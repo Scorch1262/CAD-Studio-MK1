@@ -10,7 +10,7 @@ VERSION = Path('VERSION').read_text(encoding='utf-8').strip()
 
 import importlib.util
 
-datas = [('static', 'static'), ('VERSION', '.')]
+datas = [('static', 'static'), ('VERSION', '.'), ('assets/icon-256.png', 'assets')]
 binaries = []
 hidden = ['waitress', 'hid', 'kernel']
 try:
@@ -76,6 +76,7 @@ if sys.platform == 'darwin':
         debug=False, strip=False, upx=False,
         console=False,
         argv_emulation=False,
+        icon='assets/icon.icns',
     )
     coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name='CAD-Studio-MK1')
     app = BUNDLE(
@@ -83,6 +84,7 @@ if sys.platform == 'darwin':
         name='CAD-Studio-MK1.app',
         bundle_identifier='de.scorch1262.cad-studio-mk1',
         version=VERSION,
+        icon='assets/icon.icns',
         info_plist={
             'CFBundleName': 'CAD-Studio-MK1',
             'CFBundleDisplayName': 'CAD-Studio-MK1',
@@ -101,4 +103,5 @@ else:
         debug=False, strip=False, upx=False,
         console=False,
         runtime_tmpdir=None,
+        icon='assets/icon.ico',
     )

@@ -11,6 +11,7 @@ import { ASM_FORMAT, ASM_DATUMS, CONSTRAINT_NAMES, newAssembly, newComponent, re
 import { buildBody, buildDatums, applyDisplayStyle, highlightMesh, faceGroup, DATUM_COLOR } from './render.js';
 import { parseSTL, writeSTL, readCAD, writeSTEP, writeUSDA } from './io.js';
 import { icon, status, toast, modal, promptDialog, confirmDialog, contextMenu, dashboard, setStatusEl } from './ui.js';
+import { MM, DEG, parseDimInput, entityDims, moveCoincident } from './dims.js';
 
 const App = {
   server: null, docs: [], active: null, viewer: null, sm: null,
@@ -22,7 +23,7 @@ window.CADStudio = App;
 App.run = (id) => runCmd(id);
 
 function loadDisplay() {
-  const d = { style: 'shadedEdges', planes: true, axes: true, points: true, csys: true, sketches: true, tags: true, spin: true };
+  const d = { style: 'shadedEdges', planes: true, axes: true, points: true, csys: true, sketches: true, tags: true, annots: true, spin: true };
   try { return { ...d, ...JSON.parse(localStorage.getItem('cadstudio.display') || '{}') }; } catch { return d; }
 }
 function saveDisplay() { try { localStorage.setItem('cadstudio.display', JSON.stringify(App.display)); } catch { /* egal */ } }
@@ -45,6 +46,9 @@ async function init() {
   App.hl = new THREE.Group(); App.viewer.overlay.add(App.hl);
   App.selHl = new THREE.Group(); App.viewer.overlay.add(App.selHl);
   App.measureG = new THREE.Group(); App.viewer.overlay.add(App.measureG);
+  App.fdimG = new THREE.Group(); App.viewer.overlay.add(App.fdimG);
+  App.annotG = new THREE.Group(); App.viewer.overlay.add(App.annotG);
+  App.previewG = new THREE.Group(); App.viewer.world.add(App.previewG);
   let last = performance.now();
   App.viewer.onFrame = (t) => { const dt = Math.min(0.05, (t - last) / 1000); last = t; App.sm?.frame(dt); };
   buildIGT(); bindKeys(); bindNavTabs(); bindDesktop();
@@ -247,6 +251,7 @@ function showResult(d, res) {
   if (d === doc()) {
     const hiddenFn = d.kind === 'assembly' ? (id) => d.data.layers.some(l => !l.visible && (l.items.includes(id) || l.rule === 'default' || (l.rule === 'datumPlane' && id.startsWith('ASM_')) || (l.rule === 'csys' && id === 'ASM_DEF_CSYS'))) : null;
     const dg = buildDatums(res, d.data, App.viewer, App.display, '', hiddenFn); d.group.add(dg);
+    renderAnnotations(d, res);
   }
   App.viewer.request();
 }
@@ -513,7 +518,7 @@ function toResult(h) {
     const body = o.parent.children.find(c => c.userData.role === 'body');
     const ud = o.geometry.userData || {}; const ei = ud.segEdge ? ud.segEdge[i / 2] : -1;
     const edgeRef = ei >= 0 && ud.polys ? edgeRefFromPoly(ud.polys[ei]) : null;
-    return { kind: 'edge', a, b, mesh: body?.userData.mesh, compId: u.compId, obj: o, name: edgeRef ? `Kante (${fmt(edgeRef.len, 2)} mm)` : 'Kante', world: o.matrixWorld.clone(), edgeRef, edgePoly: ei >= 0 ? ud.polys[ei] : null };
+    return { kind: 'edge', a, b, mesh: body?.userData.mesh, compId: u.compId, obj: o, name: edgeRef ? `Kante (${fmt(edgeRef.len, 2)} mm)` : 'Kante', world: o.matrixWorld.clone(), edgeRef, edgePoly: ei >= 0 ? ud.polys[ei] : null, edgeIndex: ei, polys: ud.polys || null };
   }
   if (u.role === 'body') {
     const mesh = u.mesh; const fg = faceGroup(mesh, h.faceIndex);
@@ -523,19 +528,51 @@ function toResult(h) {
   }
   return null;
 }
-function drawHl(group, r, color = 0x29c8ff) {
-  group.clear(); if (!r) { App.viewer.request(); return; }
+function drawHl(group, r, color = 0x29c8ff, keep = false) {
+  if (!keep) group.clear(); if (!r) { App.viewer.request(); return; }
   if (r.kind === 'face') { const m = highlightMesh(r.hlGeom, color, 0.45); m.matrixAutoUpdate = false; m.matrix.copy(r.world); group.add(m); }
   else if (r.kind === 'edge') {
-    const l = new THREE.Line(new THREE.BufferGeometry().setFromPoints([r.a, r.b]), new THREE.LineBasicMaterial({ color, depthTest: false, linewidth: 2 }));
+    const pts = (r.edgePoly || [G.v3arr(r.a), G.v3arr(r.b)]).map(p => new THREE.Vector3(...p));
+    const l = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color, depthTest: false, linewidth: 2 }));
     l.matrixAutoUpdate = false; l.matrix.copy(r.world); l.renderOrder = 30; group.add(l);
+  } else if (r.kind === 'plane' && keep) { planeHl(group, r.ref, r.name, color);
   } else if (r.obj) {
     const src = r.obj.type === 'Mesh' ? r.obj.parent.children.find(c => c.type === 'LineLoop') || r.obj : r.obj;
     const c = src.clone(); c.material = new THREE.LineBasicMaterial({ color, depthTest: false }); c.renderOrder = 30; group.add(c);
   }
   App.viewer.request();
 }
-function clearSelHl() { App.selHl.clear(); App.viewer.request(); }
+function clearSelHl() { App.selHl.clear(); App.viewer.clearLabels('sel'); App.viewer.request(); }
+/** Gewaehlte Bezugsebene deutlich hervorheben: Flaeche, doppelter Rand, Namensschild */
+function planeHl(group, id, name, color = 0xffb020) {
+  let fill = null;
+  doc()?.group.traverse(o => { if (o.userData.pick === 'plane' && o.userData.id === id && !o.userData.outline) fill = o; });
+  if (!fill) return;
+  const loop = fill.parent.children.find(c => c.type === 'LineLoop');
+  const f = new THREE.Mesh(fill.geometry, new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.2, side: THREE.DoubleSide, depthWrite: false, depthTest: false }));
+  f.renderOrder = 24; group.add(f);
+  if (loop) {
+    const pts = []; const pa = loop.geometry.attributes.position;
+    for (let i = 0; i < pa.count; i++) pts.push(new THREE.Vector3().fromBufferAttribute(pa, i));
+    const c = pts.reduce((s, p) => s.add(p), new THREE.Vector3()).multiplyScalar(1 / pts.length);
+    for (const k of [1, 0.985, 0.97]) {
+      const l = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(pts.map(p => c.clone().lerp(p, k))), new THREE.LineBasicMaterial({ color, depthTest: false }));
+      l.renderOrder = 26; group.add(l);
+    }
+    App.viewer.addLabel(`▶ ${name || id}`, pts[3] || pts[0], 'lbl selplane', 'sel');
+  }
+}
+/** Alle gewaehlten Elemente zeichnen (Mehrfachauswahl mit Strg) */
+function drawSel() {
+  App.selHl.clear(); App.viewer.clearLabels('sel');
+  for (const r of App.sel) {
+    if (r.kind === 'plane') planeHl(App.selHl, r.ref, r.name);
+    else if (r.kind === 'face') { drawHl(App.selHl, r, 0xffb020, true); if (r.point && !r.compId) App.viewer.addLabel('▶ Fläche', r.point, 'lbl selplane', 'sel'); }
+    else drawHl(App.selHl, r, 0xffb020, true);
+  }
+  App.viewer.request();
+}
+const selKey = (r) => r.kind === 'edge' ? `e:${(r.edgeRef?.mid || G.v3arr(r.a)).map(v => v.toFixed(3))}` : r.kind === 'face' ? `f:${r.faceIndex}:${r.compId || ''}` : `${r.kind}:${r.ref || r.compId}`;
 
 function pick({ kinds, prompt, filter, multi = false, onToggle }) {
   clearPick();
@@ -551,9 +588,9 @@ function clearPick(result = null) {
 
 function onViewHover(ev) {
   if (!ev) { App.hl.clear(); App.viewer.request(); return; }
-  const kinds = App.picking ? App.picking.kinds : isAsm() ? ['face', 'plane', 'axis'] : ['sketch', 'face', 'plane', 'axis', 'edge'];
-  const r = hitTest(ev, kinds, App.picking?.filter);
-  drawHl(App.hl, r, App.picking ? 0x4ce06a : 0x29c8ff);
+  const kinds = App.picking ? App.picking.kinds : App.dashPick ? App.dashPick.kinds : isAsm() ? ['face', 'plane', 'axis'] : ['sketch', 'face', 'plane', 'axis', 'edge'];
+  const r = hitTest(ev, kinds, App.picking?.filter || App.dashPick?.filter);
+  drawHl(App.hl, r, App.picking || App.dashPick ? 0x4ce06a : 0x29c8ff);
 }
 function onViewClick(ev) {
   const P = App.picking;
@@ -562,10 +599,17 @@ function onViewClick(ev) {
     if (P.multi) { P.onToggle?.(r, P.list); return; }
     clearPick(r); return;
   }
+  // Auswahlmodus eines offenen Dashboards (Kanten fuer Rundung/Fase, Flaechen fuer Schale)
+  if (App.dashPick) { const r = hitTest(ev, App.dashPick.kinds, App.dashPick.filter); if (r) App.dashPick.onPick(r, ev); return; }
   // normale Auswahl
   const r = hitTest(ev, isAsm() ? ['face', 'plane', 'axis'] : ['sketch', 'face', 'plane', 'axis', 'edge']);
-  App.sel = r ? [r] : [];
-  drawHl(App.selHl, r, 0xffb020);
+  if ((ev.ctrlKey || ev.metaKey) && r) {
+    // Mehrfachauswahl: Strg+Klick fuegt hinzu bzw. entfernt (z. B. mehrere Kanten fuer eine Rundung)
+    const k = selKey(r); const i = App.sel.findIndex(x => selKey(x) === k);
+    if (i >= 0) App.sel.splice(i, 1); else App.sel.push(r);
+  } else App.sel = r ? [r] : [];
+  drawSel();
+  if (App.sel.length > 1) { status(`${App.sel.length} Elemente gewählt (Strg+Klick fügt hinzu/entfernt)`, 'info', 5000); return; }
   if (r?.ref) highlightTree(r.ref); else if (r?.compId) highlightTree(r.compId); else highlightTree(null);
   if (r) status(`Gewählt: ${r.name}${r.compId ? ' (' + (doc().data.components.find(c => c.id === r.compId)?.name || '') + ')' : ''}`, 'info', 4000);
 }
@@ -575,7 +619,7 @@ function onViewDbl(ev) {
   if (r && isPart(d)) { const f = d.data.features.find(x => x.id === r.ref); if (f) editFeature(f); }
 }
 function onViewContext(ev) {
-  if (App.picking) { if (App.picking.multi) clearPick([]); return; }
+  if (App.picking) { clearPick(App.picking.multi ? [] : null); return; }
   const d = doc(); const r = App.sel[0];
   const items = [
     { label: 'Neu einpassen', icon: 'fit', action: () => App.viewer.fit(d?.res?.bbox) },
@@ -605,10 +649,12 @@ function editSketch(sk, title = 'Skizze') {
     const params = evalParams(d.data.params);
     $('#side').hidden = false;
     App.sketchTitle = title;
+    const planeName = typeof sk.plane === 'string' ? (d.res.planes.get(sk.plane)?.name || sk.plane) : 'Gewählte Fläche';
+    App.annotG?.clear(); App.viewer.clearLabels('annot');
     App.sketcher = new Sketcher({ viewer: App.viewer, frame, entities: sk.entities, params, refsEdges: d.res.edges, panel: $('#side'), status: (m) => status(m, 'info'),
-      ask: (t, l, v) => promptDialog(t, l, v) });
+      ask: (t, l, v) => promptDialog(t, l, v), dims: sk.dims, planeName: `${planeName}  ·  ${title}` });
     App.sketchDone = (ok) => {
-      if (ok) sk.entities = App.sketcher.entities.map(e => { const c = { ...e }; return c; });
+      if (ok) { sk.entities = App.sketcher.entities.map(e => ({ ...e })); sk.dims = App.sketcher.dims.map(x => ({ ...x })); }
       App.sketcher.dispose(); App.sketcher = null; $('#side').hidden = true; App.tab = 'model'; renderRibbon();
       // wie Creo: nach der Skizze zurueck in die vorherige 3D-Ausrichtung (aus Skizzenansicht -> Standard)
       const c0 = App._camBeforeSketch; const fromTop = c0 && Math.abs(new THREE.Vector3(0, 0, 1).applyQuaternion(c0.q).dot(frame.n)) > 0.999;
@@ -625,7 +671,149 @@ function editSketch(sk, title = 'Skizze') {
 // =====================================================================================
 // Feature-Ablaeufe (Dashboards)
 // =====================================================================================
-function closeDash() { if (App.dash) { App.dash.close(); App.dash = null; } }
+function closeDash() { if (App.dash) { App.dash.close(); App.dash = null; endFeatureUI(doc()); } }
+
+/** Ende eines Feature-Dashboards: Vorschau-Ueberlagerung, Auswahlmodus und Modellmasse entfernen */
+function endFeatureUI(d) {
+  App.dashPick = null; App.dashPreview = null;
+  App.previewG?.clear(); App.selHl?.clear(); if (d) setBodyGhost(d, false);
+  clearFeatureDims(); App.viewer?.request();
+}
+/** Originalkoerper unsichtbar zeichnen, aber waehlbar lassen (Vorschau liegt darueber) */
+function setBodyGhost(d, on) {
+  d.group.traverse(o => { if ((o.userData.role === 'body' || o.userData.role === 'edges') && o.material) o.material.visible = !on; });
+}
+function showOverlay(d, res) {
+  App.previewG.clear();
+  const body = buildBody(res, d.data.color); applyDisplayStyle(body, App.display.style); App.previewG.add(body);
+  setBodyGhost(d, true); App.viewer.request();
+}
+
+// ---------------------------------------------------------------- Masse am Modell waehrend der Bearbeitung
+function clearFeatureDims() { App.fdimG?.clear(); App.viewer?.clearLabels('fdim'); }
+/** Anklickbares Mass im 3D: Eingabefeld direkt am Mass */
+function dimLabel3D(pos, text, onEdit, start, unit = 'mm') {
+  const l = App.viewer.addLabel(text, pos, onEdit ? 'dim dim3d' : 'dim dim3d ro', 'fdim');
+  if (!onEdit) return l;
+  l.el.title = 'Klicken zum Ändern';
+  l.el.addEventListener('pointerdown', (ev) => {
+    ev.stopPropagation(); if (l.el.querySelector('input')) return;
+    const inp = el('input', { class: 'dim-edit', value: start ?? '' });
+    l.el.replaceChildren(inp, unit ? el('span', { class: 'dim-unit' }, unit) : ''); setTimeout(() => { inp.focus(); inp.select(); }, 0);
+    let fin = false;
+    const done = async (ok) => {
+      if (fin) return; fin = true;
+      if (ok) { try { await onEdit(parseDimInput(inp.value, evalParams(doc().data.params))); } catch (e) { toast(e.message, 'err'); } }
+      l.el.textContent = text;
+    };
+    inp.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') done(true); if (e.key === 'Escape') done(false); });
+    inp.addEventListener('pointerdown', (e) => e.stopPropagation());
+    inp.addEventListener('blur', () => done(true), { once: true });
+  });
+  return l;
+}
+function arrow3D(from, to, color = 0xffe066) {
+  const dir = to.clone().sub(from); const len = dir.length(); if (len < 1e-9) return;
+  const head = Math.min(len * 0.25, App.viewer.pxToWorld(14));
+  const a = new THREE.ArrowHelper(dir.normalize(), from, len, color, head, head * 0.45);
+  a.traverse(o => { if (o.material) { o.material.depthTest = false; o.renderOrder = 28; } });
+  App.fdimG.add(a);
+  const b = new THREE.ArrowHelper(dir.clone().negate(), to, len, color, head, head * 0.45);
+  b.traverse(o => { if (o.material) { o.material.depthTest = false; o.renderOrder = 28; } }); b.line.visible = false;
+  App.fdimG.add(b);
+}
+/** Masse des bearbeiteten Features einblenden (Tiefe, Winkel, Ø, R, Abstaende, Skizzenmasse) – alle anklickbar */
+function renderFeatureDims(feat, res) {
+  clearFeatureDims(); if (!App.dash || !res) return;
+  const vals = App.dash.vals; const P = res.params || {};
+  const X = (v, def = 0) => { try { return evalExpr(v, P); } catch { return def; } };
+  const chg = (key) => async (v) => { App.dash.change(key, v); };
+  const start = (key) => (vals[key] === undefined ? '' : String(vals[key]));
+  const pad = App.viewer.pxToWorld(16);
+  const t = feat.type;
+  // Skizzenmasse von Extrudieren/Drehen
+  if (t === 'extrude' || t === 'revolve') {
+    let frame, ents, entsSrc, refId = vals.skref || feat.params.sketch?.ref;
+    try {
+      if (refId) { const s = res.sketches.get(refId); if (!s) return; frame = s.frame; entsSrc = s.entities; }
+      else { frame = planeRef(res, vals.plane ?? feat.params.sketch.plane); entsSrc = feat.params.sketch.entities || []; }
+      ents = G.resolveEntities(entsSrc, P);
+    } catch { return; }
+    ents.forEach((e, i) => {
+      for (const dm of entityDims({ ...entsSrc[i] }, e, pad, P)) {
+        dimLabel3D(frame.to3(dm.x, dm.y), dm.text, async (v) => {
+          if (refId) {
+            const f = doc().data.features.find(x => x.id === refId); if (!f) return;
+            const ff = clone(f); const tgt = ff.params.entities[i];
+            const tmp = entityDims(tgt, G.resolveEntities(ff.params.entities, P)[i], pad, P, (ox, oy, nx, ny, ex) => moveCoincident(ff.params.entities, ox, oy, nx, ny, ex));
+            tmp.find(z => z.text === dm.text)?.apply(v);
+            await commit((data) => { data.features[data.features.findIndex(x => x.id === refId)] = ff; });
+          } else {
+            const tgt = entsSrc[i];
+            const tmp = entityDims(tgt, e, pad, P, (ox, oy, nx, ny, ex) => moveCoincident(entsSrc, ox, oy, nx, ny, ex));
+            tmp.find(z => z.text === dm.text)?.apply(v);
+          }
+          App.dashPreview?.();
+        }, dm.start);
+      }
+    });
+    const loops = G.sketchLoops(ents).loops.flat();
+    const c2 = loops.length ? loops.reduce((s, p) => ({ x: s.x + p.x, y: s.y + p.y }), { x: 0, y: 0 }) : { x: 0, y: 0 };
+    if (loops.length) { c2.x /= loops.length; c2.y /= loops.length; }
+    const p0 = frame.to3(c2.x, c2.y);
+    if (t === 'extrude') {
+      const n = frame.n.clone().multiplyScalar(vals.flip ? -1 : 1);
+      if (vals.through) { dimLabel3D(p0.clone().addScaledVector(n, res.bbox.getSize(new THREE.Vector3()).length() * 0.3), 'Durch alles'); }
+      else {
+        const dd = X(vals.depth); let w0 = 0, w1 = dd;
+        if (vals.side === 'sym') { w0 = -dd / 2; w1 = dd / 2; } else if (vals.side === 'two') w0 = -X(vals.depth2, dd);
+        const a = p0.clone().addScaledVector(n, w0), b = p0.clone().addScaledVector(n, w1);
+        if (vals.side === 'two') {
+          arrow3D(p0, b); arrow3D(p0, a);
+          dimLabel3D(p0.clone().addScaledVector(n, w1 / 2).addScaledVector(frame.x, pad), MM(dd), chg('depth'), start('depth'));
+          dimLabel3D(p0.clone().addScaledVector(n, w0 / 2).addScaledVector(frame.x, pad), MM(-w0), chg('depth2'), start('depth2'));
+        } else {
+          arrow3D(a, b);
+          dimLabel3D(a.clone().lerp(b, 0.5).addScaledVector(frame.x, pad), MM(dd), chg('depth'), start('depth'));
+        }
+      }
+    } else {
+      dimLabel3D(p0.clone().addScaledVector(frame.y, pad * 2), DEG(X(vals.angle, 360)), chg('angle'), start('angle'), '°');
+    }
+  } else if (t === 'hole') {
+    let fr; try { fr = planeRef(res, vals.plane); } catch { return; }
+    const u = X(vals.u), v = X(vals.v); const o = fr.to3(u, v);
+    const dir = fr.n.clone().multiplyScalar(vals.flip ? 1 : -1); const r = X(vals.d) / 2;
+    dimLabel3D(o.clone().addScaledVector(fr.x, r + pad), `Ø ${MM(X(vals.d))}`, chg('d'), start('d'));
+    if (!vals.through) { const e = o.clone().addScaledVector(dir, X(vals.depth)); arrow3D(o.clone().addScaledVector(fr.x, -r - pad * 0.5), e.clone().addScaledVector(fr.x, -r - pad * 0.5)); dimLabel3D(o.clone().lerp(e, 0.5).addScaledVector(fr.x, -r - pad * 1.5), MM(X(vals.depth)), chg('depth'), start('depth')); }
+    if (Math.abs(u) > 1e-9) { arrow3D(fr.o, fr.to3(u, 0)); dimLabel3D(fr.o.clone().lerp(fr.to3(u, 0), 0.5).addScaledVector(fr.y, -pad), MM(Math.abs(u)), chg('u'), start('u')); }
+    if (Math.abs(v) > 1e-9) { arrow3D(fr.to3(u, 0), o); dimLabel3D(fr.to3(u, 0).lerp(o, 0.5).addScaledVector(fr.x, pad), MM(Math.abs(v)), chg('v'), start('v')); }
+  } else if (t === 'round' || t === 'chamfer') {
+    // ein Mass genuegt (gilt fuer alle gewaehlten Kanten) – an der zuletzt gewaehlten Kante
+    const e = feat.params.edges[feat.params.edges.length - 1];
+    if (e) {
+      const m = e.mid || e.a.map((q, k) => (q + e.b[k]) / 2); const n = feat.params.edges.length;
+      dimLabel3D(new THREE.Vector3(...m), `${t === 'round' ? 'R ' : ''}${MM(X(vals.size))}${n > 1 ? `  (${n} Kanten)` : ''}`, chg('size'), start('size'));
+    }
+  } else if (t === 'shell') {
+    const f0 = feat.params.faces[0]; if (f0) dimLabel3D(new THREE.Vector3(...(f0.point || f0)), `Wand ${MM(X(vals.thickness))}`, chg('thickness'), start('thickness'));
+  } else if (t === 'pattern') {
+    const tools = res.tools?.get(vals.ref); if (!tools?.length) return;
+    const bb = new THREE.Box3(); for (const tt of tools) { tt.geom.computeBoundingBox(); bb.union(tt.geom.boundingBox); }
+    const c = bb.getCenter(new THREE.Vector3()); const up = new THREE.Vector3(0, 1, 0).applyQuaternion(App.viewer.camera.quaternion).multiplyScalar(pad * 1.6);
+    dimLabel3D(c.clone().add(up), `${Math.round(X(vals.count, 1))} ×`, chg('count'), start('count'), '');
+    if (vals.kind === 'axial') dimLabel3D(c.clone().sub(up), DEG(X(vals.angle)), chg('angle'), start('angle'), '°');
+    else dimLabel3D(c.clone().sub(up), MM(X(vals.spacing)), chg('spacing'), start('spacing'));
+  } else if (t === 'datumPlane') {
+    const pl = res.planes.get(feat.id); if (!pl) return;
+    let ref; try { ref = planeRef(res, vals.ref); } catch { ref = null; }
+    const c = pl.frame.o.clone();
+    if (ref) arrow3D(ref.o.clone(), c);
+    dimLabel3D(c.clone().addScaledVector(pl.frame.x, pad), MM(X(vals.offset)), chg('offset'), start('offset'));
+    if (X(vals.angle)) dimLabel3D(c.clone().addScaledVector(pl.frame.y, pad * 2), DEG(X(vals.angle)), chg('angle'), start('angle'), '°');
+  }
+  App.viewer.request();
+}
 
 function planeOptions(vals, key) {
   const d = doc(); const out = [];
@@ -643,16 +831,19 @@ function axisOptions(withPlanes = true) {
 const refVal = (v) => (v && typeof v === 'object') ? '__obj' : v;
 
 /** generischer Dashboard-Lauf mit Live-Vorschau */
-function runFeature({ feat, replaceId, title, fields, apply, after }) {
+function runFeature({ feat, replaceId, title, fields, apply, after, overlay = false, pickKinds = null, onPick = null, pickFilter = null }) {
   const d = doc(); closeDash();
   const preview = debounce(async () => {
-    try { apply(App.dash.vals, feat); } catch (e) { App.dash.error(e.message); return; }
+    if (!App.dash) return;
+    try { apply(App.dash.vals, feat); } catch (e) { App.dash.error(e.message); if (overlay) { App.previewG.clear(); setBodyGhost(d, false); clearFeatureDims(); App.viewer.request(); } return; }
     const seq = (App._pseq = (App._pseq || 0) + 1);
     const res = await regenerate(d.data, { extra: feat, replaceId, preview: true });
     if (seq !== App._pseq || !App.dash) return; // veraltete Vorschau verwerfen
-    showResult(d, res); App._preview = res;
+    if (overlay) showOverlay(d, res); else showResult(d, res);
+    App._preview = res;
     const err = res.errors.find(x => x.id === feat.id); App.dash?.error(err ? err.msg : '');
-  }, 220);
+    renderFeatureDims(feat, res);
+  }, 160);
   App.dash = dashboard({
     title, iconName: FEATURE_INFO[feat.type].icon, fields: fields.map(f => ({ ...f, value: f.value })),
     onChange: async (vals, key) => {
@@ -671,6 +862,7 @@ function runFeature({ feat, replaceId, title, fields, apply, after }) {
       const res = await regenerate(d.data, { extra: feat, replaceId });
       const err = res.errors.find(x => x.id === feat.id);
       if (err) { App.dash.error(err.msg); return false; }
+      endFeatureUI(d);
       await commit((data) => {
         if (replaceId) { const i = data.features.findIndex(x => x.id === replaceId); data.features[i] = feat; }
         else insertFeature(data, feat);
@@ -678,9 +870,11 @@ function runFeature({ feat, replaceId, title, fields, apply, after }) {
       App.dash = null; after?.();
       return true;
     },
-    onCancel: () => { App.dash = null; rebuild(d); },
+    onCancel: () => { App.dash = null; endFeatureUI(d); clearSelHl(); rebuild(d); },
   });
   for (const f of fields) f._last = f.value;
+  App.dashPreview = preview;
+  if (onPick) App.dashPick = { kinds: pickKinds, onPick, filter: pickFilter };
   preview();
   return App.dash;
 }
@@ -859,34 +1053,58 @@ async function featEdge(type, existing) {
   const feat = existing ? clone(existing) : makeFeature(d.data, type, { size: type === 'round' ? 3 : 1, edges: [] });
   const edgeData = (r) => { if (KERNEL.available) { if (!r.edgeRef) throw new Error('Kante gehört nicht zum B-Rep-Körper (importierte Geometrie?)'); return r.edgeRef; } return G.edgeInfo(r.mesh, r.a, r.b); };
   const midOf = (e) => e.mid || e.a.map((v, i) => (v + e.b[i]) / 2);
-  if (!existing && App.sel[0]?.kind === 'edge') { try { feat.params.edges.push(edgeData(App.sel[0])); } catch (e) { toast(e.message, 'warn'); } }
-  const chooseEdges = async () => {
-    closeDash(); await rebuild();
-    const showSel = () => { App.selHl.clear(); for (const e of feat.params.edges) { const l = new THREE.Line(new THREE.BufferGeometry().setFromPoints((e.poly || [e.a, e.b]).map(p => new THREE.Vector3(...p))), new THREE.LineBasicMaterial({ color: 0xffb020, depthTest: false })); l.renderOrder = 30; App.selHl.add(l); } App.viewer.request(); };
-    showSel();
-    const res = await pick({ kinds: ['edge'], multi: true, prompt: 'Kanten anklicken (erneut klicken = abwählen)', onToggle: (r) => {
-      try {
-        const info = edgeData(r); const mi = midOf(info);
-        const k = feat.params.edges.findIndex(e => Math.hypot(...midOf(e).map((x, i) => x - mi[i])) < 1e-3);
-        if (k >= 0) feat.params.edges.splice(k, 1); else feat.params.edges.push(info);
-        showSel(); status(`${feat.params.edges.length} Kante(n) gewählt – Enter oder Rechtsklick beendet die Auswahl`, 'pick');
-      } catch (e) { toast(e.message, 'warn'); }
-    } });
+  const findIdx = (info) => { const mi = midOf(info); return feat.params.edges.findIndex(e => Math.hypot(...midOf(e).map((x, i) => x - mi[i])) < 1e-3); };
+  const showSel = () => {
     App.selHl.clear();
-    openDash();
-    return res;
+    for (const e of feat.params.edges) { const l = new THREE.Line(new THREE.BufferGeometry().setFromPoints((e.poly || [e.a, e.b]).map(p => new THREE.Vector3(...p))), new THREE.LineBasicMaterial({ color: 0xffb020, depthTest: false })); l.renderOrder = 30; App.selHl.add(l); }
+    App.viewer.request();
   };
-  const openDash = () => runFeature({
-    feat, replaceId: existing?.id, title: feat.name,
+  // vorausgewaehlte Kanten (auch mehrere per Strg+Klick)
+  if (!existing) for (const r of App.sel.filter(x => x.kind === 'edge')) { try { if (findIdx(edgeData(r)) < 0) feat.params.edges.push(edgeData(r)); } catch (e) { toast(e.message, 'warn'); } }
+  App.sel = []; clearSelHl();
+  let chain = true; // wie Creo: tangentiale Kanten werden standardmaessig mitgewaehlt
+  const onPick = (r) => {
+    try {
+      const list = [r];
+      if (chain && r.edgeIndex >= 0 && r.polys) for (const ei of tangentChain(r.polys, r.edgeIndex)) if (ei !== r.edgeIndex) list.push({ ...r, edgeRef: edgeRefFromPoly(r.polys[ei]), edgePoly: r.polys[ei], edgeIndex: ei });
+      const first = findIdx(edgeData(r));
+      if (first >= 0) { for (const x of list) { const k = findIdx(edgeData(x)); if (k >= 0) feat.params.edges.splice(k, 1); } }
+      else for (const x of list) { const info = edgeData(x); if (findIdx(info) < 0) feat.params.edges.push(info); }
+      showSel(); App.dash?.render(); App.dashPreview?.();
+      status(`${feat.params.edges.length} Kante(n) gewählt – weitere Kanten anklicken (erneut = abwählen)`, 'pick');
+    } catch (e) { toast(e.message, 'warn'); }
+  };
+  runFeature({
+    feat, replaceId: existing?.id, title: feat.name, overlay: true, pickKinds: ['edge'], onPick,
     fields: [
       { key: 'size', label: type === 'round' ? 'Radius' : 'Abstand D', type: 'expr', value: feat.params.size },
       { type: 'info', value: () => `${feat.params.edges.length} Kante(n)` },
-      { type: 'button', label: 'Kanten wählen…', icon: 'select', primary: !feat.params.edges.length, onClick: () => chooseEdges() },
-      { type: 'info', value: KERNEL.available ? 'Beliebige Kanten (gerade und gekrümmt)' : 'Nur gerade Kanten zwischen ebenen Flächen (interner Kern)' },
+      { key: 'chain', label: 'Tangentenkette', type: 'check', value: true },
+      { type: 'button', label: 'Auswahl leeren', icon: 'select', onClick: () => { feat.params.edges.length = 0; showSel(); App.dash?.render(); App.dashPreview?.(); } },
+      { type: 'info', value: KERNEL.available ? 'Kanten nacheinander anklicken – die Vorschau folgt sofort' : 'Nur gerade Kanten zwischen ebenen Flächen (interner Kern)' },
     ],
-    apply: (v, f) => { f.params.size = v.size; },
+    apply: (v, f) => { f.params.size = v.size; chain = !!v.chain; if (!f.params.edges.length) throw new Error('Kanten im Modell anklicken'); },
   });
-  if (!feat.params.edges.length) await chooseEdges(); else openDash();
+  showSel();
+  status('Kanten anklicken (erneut = abwählen) – Vorschau erscheint sofort', 'pick');
+}
+
+/** Tangential anschliessende Kanten (gemeinsamer Endpunkt, gleiche Richtung) – Breitensuche */
+function tangentChain(polys, start) {
+  const ends = polys.map(pl => {
+    const n = pl.length; const V = (p) => new THREE.Vector3(...p);
+    return [{ p: V(pl[0]), t: V(pl[0]).sub(V(pl[1])).normalize() }, { p: V(pl[n - 1]), t: V(pl[n - 1]).sub(V(pl[n - 2])).normalize() }];
+  });
+  let L = 0; for (const e of ends) L = Math.max(L, e[0].p.length(), e[1].p.length()); const tol = Math.max(1e-4, L * 1e-6);
+  const seen = new Set([start]); const q = [start];
+  while (q.length) {
+    const i = q.shift();
+    for (const ea of ends[i]) for (let j = 0; j < ends.length; j++) {
+      if (seen.has(j)) continue;
+      for (const eb of ends[j]) if (ea.p.distanceTo(eb.p) < tol && -ea.t.dot(eb.t) > 0.985) { seen.add(j); q.push(j); break; }
+    }
+  }
+  return [...seen];
 }
 
 function featureOptions(types = ['extrude', 'revolve', 'hole', 'round', 'chamfer', 'pattern', 'mirror']) {
@@ -921,30 +1139,25 @@ async function featShell(existing) {
   const d = doc(); if (!d.res.body) { toast('Kein Körper vorhanden', 'warn'); return; }
   if (!KERNEL.available) { toast('Schale benötigt den usd-brep-Kern (unter macOS nicht verfügbar)', 'warn'); return; }
   const feat = existing ? clone(existing) : makeFeature(d.data, 'shell', { thickness: 2, faces: [], outward: false });
-  const chooseFaces = async () => {
-    closeDash(); await rebuild();
-    const showSel = () => { App.selHl.clear(); for (const f of feat.params.faces) if (f.hl) App.selHl.add(highlightMesh(f.hl, 0xffb020, 0.45)); App.viewer.request(); };
-    showSel();
-    await pick({ kinds: ['face'], multi: true, prompt: 'Zu entfernende Flächen anklicken (erneut = abwählen), Enter/Rechtsklick beendet', filter: (h) => !h.object.userData.compId, onToggle: (r) => {
-      const pt = G.v3arr(r.point).map(v => +v.toFixed(6));
-      const k = feat.params.faces.findIndex(f => new THREE.Vector3(...(f.normal || [0, 0, 0])).dot(r.normal) > 0.9999 && Math.abs(new THREE.Vector3(...f.point).sub(r.point).dot(r.normal)) < 1e-4);
-      if (k >= 0) feat.params.faces.splice(k, 1); else feat.params.faces.push({ point: pt, normal: G.v3arr(r.normal), hl: r.hlGeom });
-      showSel(); status(`${feat.params.faces.length} Fläche(n) gewählt`, 'pick');
-    } });
-    App.selHl.clear();
-    openDash();
-  };
-  const openDash = () => runFeature({
-    feat, replaceId: existing?.id, title: feat.name,
+  const sel = feat.params.faces.map(f => ({ point: f.point || f, normal: f.normal || null, hl: null }));
+  const findIdx = (r) => sel.findIndex(f => new THREE.Vector3(...(f.normal || [0, 0, 0])).dot(r.normal) > 0.9999 && Math.abs(new THREE.Vector3(...f.point).sub(r.point).dot(r.normal)) < 1e-4);
+  const showSel = () => { App.selHl.clear(); for (const f of sel) if (f.hl) App.selHl.add(highlightMesh(f.hl, 0xffb020, 0.45)); App.viewer.request(); };
+  const add = (r) => { const k = findIdx(r); if (k >= 0) sel.splice(k, 1); else sel.push({ point: G.v3arr(r.point).map(v => +v.toFixed(6)), normal: G.v3arr(r.normal), hl: r.hlGeom }); };
+  if (!existing) for (const r of App.sel.filter(x => x.kind === 'face' && !x.compId)) add(r);
+  App.sel = []; clearSelHl();
+  runFeature({
+    feat, replaceId: existing?.id, title: feat.name, overlay: true, pickKinds: ['face'], pickFilter: (h) => !h.object.userData.compId,
+    onPick: (r) => { add(r); showSel(); App.dash?.render(); App.dashPreview?.(); status(`${sel.length} Fläche(n) gewählt – weitere anklicken (erneut = abwählen)`, 'pick'); },
     fields: [
       { key: 'thickness', label: 'Wandstärke', type: 'expr', value: feat.params.thickness },
       { key: 'outward', label: 'Nach außen', type: 'check', value: !!feat.params.outward },
-      { type: 'info', value: () => `${feat.params.faces.length} Fläche(n) entfernt` },
-      { type: 'button', label: 'Flächen wählen…', icon: 'select', onClick: () => chooseFaces() },
+      { type: 'info', value: () => `${sel.length} Fläche(n) entfernt` },
+      { type: 'button', label: 'Auswahl leeren', icon: 'select', onClick: () => { sel.length = 0; showSel(); App.dash?.render(); App.dashPreview?.(); } },
     ],
-    apply: (v, f) => { f.params.thickness = v.thickness; f.params.outward = v.outward; f.params.faces = feat.params.faces.map(x => ({ point: x.point, normal: x.normal })); },
+    apply: (v, f) => { f.params.thickness = v.thickness; f.params.outward = v.outward; f.params.faces = sel.map(x => ({ point: x.point, normal: x.normal })); },
   });
-  if (!existing) await chooseFaces(); else openDash();
+  showSel();
+  status('Zu entfernende Flächen anklicken (erneut = abwählen)', 'pick');
 }
 
 async function featMirror(existing) {
@@ -1131,8 +1344,8 @@ async function moveDialog(comp) {
   const inp = (l, v = 0) => el('input', { value: v, style: 'width:80px' });
   const t = [inp(), inp(), inp()], r = [inp(), inp(), inp()];
   const res = await modal({ title: `${comp.name} verschieben/drehen`, body: el('div', {},
-    el('div', { class: 'row' }, el('span', { class: 'w80' }, 'Verschieben'), ...t.map((x, i) => el('label', {}, 'XYZ'[i], x))),
-    el('div', { class: 'row' }, el('span', { class: 'w80' }, 'Drehen [°]'), ...r.map((x, i) => el('label', {}, 'XYZ'[i], x))),
+    el('div', { class: 'row' }, el('span', { class: 'w80' }, 'Verschieben [mm]'), ...t.map((x, i) => el('label', {}, 'XYZ'[i], x, el('span', { class: 'unit' }, 'mm')))),
+    el('div', { class: 'row' }, el('span', { class: 'w80' }, 'Drehen [°]'), ...r.map((x, i) => el('label', {}, 'XYZ'[i], x, el('span', { class: 'unit' }, '°')))),
     el('p', { class: 'muted small' }, 'Relativ zur aktuellen Lage (Baugruppen-Koordinaten). Vorhandene Bedingungen werden danach erneut gelöst.')),
   buttons: [{ label: 'Abbrechen', value: null }, { label: 'Anwenden', primary: true, value: () => ({ t: t.map(x => +x.value.replace(',', '.') || 0), r: r.map(x => +x.value.replace(',', '.') || 0) }) }] });
   if (!res) return;
@@ -1189,11 +1402,113 @@ async function measureDistance() {
   App.viewer.addLabel(`${fmt(dist, 3)} mm`, pa.p.clone().add(pb.p).multiplyScalar(0.5), 'lbl measure', 'measure');
   let ang = '';
   if (a.kind === 'face' && b.kind === 'face') { const w = Math.acos(THREE.MathUtils.clamp(a.normal.dot(b.normal), -1, 1)) * 180 / Math.PI; ang = ` · Winkel zwischen Flächen ${fmt(180 - w, 3)}° (Normalen ${fmt(w, 3)}°)`; if (Math.abs(a.normal.dot(b.normal)) > 0.99999) { const pd = Math.abs(b.point.clone().sub(a.point).dot(a.normal)); ang += ` · Ebenenabstand ${fmt(pd, 4)} mm`; } }
-  status(`Abstand ${fmt(dist, 4)} mm (${pa.label} → ${pb.label}) · ΔX ${fmt(dvec.x, 3)} · ΔY ${fmt(dvec.y, 3)} · ΔZ ${fmt(dvec.z, 3)}${ang}`, 'ok');
+  status(`Abstand ${fmt(dist, 4)} mm (${pa.label} → ${pb.label}) · ΔX ${fmt(dvec.x, 3)} mm · ΔY ${fmt(dvec.y, 3)} mm · ΔZ ${fmt(dvec.z, 3)} mm${ang}`, 'ok');
   App.viewer.request();
   function drawPt(p) { const m = new THREE.Points(new THREE.BufferGeometry().setFromPoints([p]), new THREE.PointsMaterial({ color: 0xffe066, size: 9, sizeAttenuation: false, depthTest: false })); m.renderOrder = 40; App.measureG.add(m); App.viewer.request(); }
 }
 function clearMeasure() { App.measureG.clear(); App.viewer.clearLabels('measure'); App.viewer.request(); }
+
+// ---------------------------------------------------------------- Bemassung am Koerper (Referenzmasse)
+const V3 = (p) => new THREE.Vector3(...p);
+/** Kreis erkennen: alle Punkte gleich weit vom Schwerpunkt, geschlossen */
+function circleOf(pl) {
+  if (!pl || pl.length < 8) return null;
+  const P = pl.map(V3); const closed = P[0].distanceTo(P[P.length - 1]) < 1e-6 * (1 + P[0].length());
+  if (!closed) return null;
+  const c = P.slice(0, -1).reduce((s, p) => s.add(p), new THREE.Vector3()).multiplyScalar(1 / (P.length - 1));
+  const rs = P.map(p => p.distanceTo(c)); const r = rs.reduce((s, x) => s + x, 0) / rs.length;
+  return rs.every(x => Math.abs(x - r) < Math.max(1e-4, r * 1e-3)) ? { c, r } : null;
+}
+/** Kantenzuege des Ergebnisses (usd-brep: exakte Kanten; interner Kern: einzelne Segmente) */
+function edgePolys(res) {
+  const ud = res.edges?.userData; if (ud?.polys) return ud.polys;
+  if (res._segPolys) return res._segPolys;
+  const p = res.edges?.attributes?.position; const out = [];
+  if (p) for (let i = 0; i + 1 < p.count; i += 2) out.push([[p.getX(i), p.getY(i), p.getZ(i)], [p.getX(i + 1), p.getY(i + 1), p.getZ(i + 1)]]);
+  res._segPolys = out; return out;
+}
+function polyLen(pl) { let L = 0; for (let i = 1; i < pl.length; i++) L += Math.hypot(pl[i][0] - pl[i - 1][0], pl[i][1] - pl[i - 1][1], pl[i][2] - pl[i - 1][2]); return L; }
+/** Punkt fangen: Eckpunkt in der Naehe, sonst Kantenmitte bzw. Flaechenpunkt */
+function snapPoint(r) {
+  if (r.kind === 'edge') {
+    const pl = r.edgePoly; if (!pl) return r.a.clone().add(r.b).multiplyScalar(0.5);
+    const cir = circleOf(pl); if (cir) return cir.c;
+    return V3(edgeRefFromPoly(pl).mid);
+  }
+  const m = r.obj.userData.mesh; const loc = r.localPoint; let best = null, bd = App.viewer.pxToWorld(14);
+  for (let i = 0; i < m.pos.length; i += 3) { const dd = Math.hypot(m.pos[i] - loc.x, m.pos[i + 1] - loc.y, m.pos[i + 2] - loc.z); if (dd < bd) { bd = dd; best = i; } }
+  return best !== null ? new THREE.Vector3(m.pos[best], m.pos[best + 1], m.pos[best + 2]) : r.point.clone();
+}
+async function createAnnotation() {
+  const d = doc(); if (!isPart(d) || !d.res.body) { toast('Bemaßung: zuerst einen Körper erzeugen', 'warn'); return; }
+  const a = await pick({ kinds: ['edge', 'face'], prompt: 'Bemaßung: Kante (Länge/Ø) oder ersten Punkt/Fläche wählen' }); if (!a) return;
+  let ann = null;
+  const b = await pick({ kinds: ['edge', 'face'], prompt: a.kind === 'edge' ? 'Zweiten Punkt/Fläche wählen – Enter oder Rechtsklick = Länge bzw. Ø dieser Kante' : 'Zweiten Punkt bzw. parallele Fläche wählen' });
+  if (!b) {
+    if (a.kind !== 'edge') { status('Bemaßung abgebrochen', 'info', 2500); return; }
+    const pl = a.edgePoly || [G.v3arr(a.a), G.v3arr(a.b)];
+    const cir = circleOf(pl); const ref = edgeRefFromPoly(pl);
+    ann = cir ? { id: uid('a'), type: 'dia', mid: ref.mid, len: ref.len } : { id: uid('a'), type: 'len', mid: ref.mid, len: ref.len };
+  } else if (a.kind === 'face' && b.kind === 'face' && Math.abs(a.normal.dot(b.normal)) > 0.99999) {
+    ann = { id: uid('a'), type: 'pdist', p1: G.v3arr(a.point), n1: G.v3arr(a.normal), p2: G.v3arr(b.point), n2: G.v3arr(b.normal) };
+  } else {
+    ann = { id: uid('a'), type: 'dist', p1: G.v3arr(snapPoint(a)), p2: G.v3arr(snapPoint(b)) };
+  }
+  await commit((data) => { (data.annotations ||= []).push(ann); });
+  status('Bemaßung erstellt – Rechtsklick auf das Maß löscht sie', 'ok', 4000);
+}
+/** Referenzmass nach der Regenerierung neu fangen: Rueckgabe {pts, text, pos} oder {stale} */
+function resolveAnnotation(an, res) {
+  const tol = Math.max(1e-3, (res.bbox?.getSize(new THREE.Vector3()).length() || 100) * 1e-4);
+  const polys = edgePolys(res);
+  const onMesh = (p) => { const m = res.mesh; if (!m) return false; for (let i = 0; i < m.pos.length; i += 3) if (Math.hypot(m.pos[i] - p.x, m.pos[i + 1] - p.y, m.pos[i + 2] - p.z) < tol) return true;
+    for (const pl of polys) { const mid = V3(edgeRefFromPoly(pl).mid); if (mid.distanceTo(p) < tol) return true; const c = circleOf(pl); if (c && c.c.distanceTo(p) < tol) return true; } return false; };
+  const onPlane = (p, n) => { const m = res.mesh; if (!m) return false; const N = V3(n); const t = m.tri;
+    for (let i = 0; i < t.length; i += 3) { const A = new THREE.Vector3(m.pos[t[i] * 3], m.pos[t[i] * 3 + 1], m.pos[t[i] * 3 + 2]); const B = new THREE.Vector3(m.pos[t[i + 1] * 3], m.pos[t[i + 1] * 3 + 1], m.pos[t[i + 1] * 3 + 2]); const C = new THREE.Vector3(m.pos[t[i + 2] * 3], m.pos[t[i + 2] * 3 + 1], m.pos[t[i + 2] * 3 + 2]);
+      const fn = B.clone().sub(A).cross(C.clone().sub(A)); if (fn.lengthSq() < 1e-20) continue; fn.normalize(); if (fn.dot(N) > 0.9999 && Math.abs(V3(p).sub(A).dot(N)) < tol) return true; } return false; };
+  if (an.type === 'len' || an.type === 'dia') {
+    let best = null, bd = tol * 10;
+    for (const pl of polys) { const dd = V3(edgeRefFromPoly(pl).mid).distanceTo(V3(an.mid)); if (dd < bd) { bd = dd; best = pl; } }
+    if (!best) return { stale: true, pos: V3(an.mid), text: an.type === 'dia' ? `Ø ${MM(an.len / Math.PI)}` : MM(an.len) };
+    if (an.type === 'dia') { const c = circleOf(best); if (!c) return { stale: true, pos: V3(an.mid), text: 'Ø ?' }; return { pts: [c.c.clone().addScaledVector(V3(best[0]).sub(c.c).normalize(), c.r), c.c.clone().addScaledVector(V3(best[0]).sub(c.c).normalize(), -c.r)], text: `Ø ${MM(c.r * 2)}`, pos: V3(best[0]) }; }
+    return { pts: best.map(V3), line: true, text: MM(polyLen(best)), pos: V3(edgeRefFromPoly(best).mid) };
+  }
+  if (an.type === 'dist') {
+    const onSurf = (p) => { const m = res.mesh; if (!m) return false; const t = m.tri; const T = new THREE.Triangle(); const q = new THREE.Vector3();
+      for (let i = 0; i < t.length; i += 3) { T.a.fromArray(m.pos, t[i] * 3); T.b.fromArray(m.pos, t[i + 1] * 3); T.c.fromArray(m.pos, t[i + 2] * 3); T.closestPointToPoint(p, q); if (q.distanceTo(p) < tol * 10) return true; } return false; };
+    const p1 = V3(an.p1), p2 = V3(an.p2); const ok = (onMesh(p1) || onSurf(p1)) && (onMesh(p2) || onSurf(p2));
+    return { stale: !ok, pts: [p1, p2], text: MM(p1.distanceTo(p2)), pos: p1.clone().lerp(p2, 0.5) };
+  }
+  if (an.type === 'pdist') {
+    const p1 = V3(an.p1), N = V3(an.n1); const dd = Math.abs(V3(an.p2).sub(p1).dot(N)); const p2 = p1.clone().addScaledVector(N, V3(an.p2).sub(p1).dot(N));
+    const ok = onPlane(an.p1, an.n1) && onPlane(an.p2, an.n2);
+    return { stale: !ok, pts: [p1, p2], text: MM(dd), pos: p1.clone().lerp(p2, 0.5) };
+  }
+  return { stale: true, pos: new THREE.Vector3(), text: '?' };
+}
+function renderAnnotations(d, res) {
+  App.annotG?.clear(); App.viewer.clearLabels('annot');
+  if (!isPart(d) || App.sketcher || !App.display.annots || !d.data.annotations?.length || !res) return;
+  for (const an of d.data.annotations) {
+    let r; try { r = resolveAnnotation(an, res); } catch { r = { stale: true, pos: new THREE.Vector3(), text: '?' }; }
+    const col = r.stale ? 0xff5050 : 0x6fd3ff;
+    if (r.pts && !r.line) arrowPair(r.pts[0], r.pts[1], col);
+    else if (r.pts) { const l = new THREE.Line(new THREE.BufferGeometry().setFromPoints(r.pts), new THREE.LineBasicMaterial({ color: col, depthTest: false })); l.renderOrder = 27; App.annotG.add(l); }
+    const lb = App.viewer.addLabel(r.text, r.pos, `dim ref${r.stale ? ' stale' : ''}`, 'annot');
+    lb.el.title = r.stale ? 'Referenz nicht mehr vorhanden – Rechtsklick löscht' : 'Referenzmaß – Rechtsklick löscht';
+    lb.el.addEventListener('contextmenu', (ev) => { ev.preventDefault(); ev.stopPropagation();
+      contextMenu(ev.clientX, ev.clientY, [{ label: 'Bemaßung löschen', icon: 'close', action: () => commit((data) => { data.annotations = data.annotations.filter(x => x.id !== an.id); }) }]); });
+  }
+  App.viewer.request();
+}
+function arrowPair(p1, p2, col) {
+  const dir = p2.clone().sub(p1); const len = dir.length(); if (len < 1e-9) return; dir.normalize();
+  const head = Math.min(len * 0.3, App.viewer.pxToWorld(12));
+  for (const [o, dv] of [[p1, dir], [p2, dir.clone().negate()]]) {
+    const ah = new THREE.ArrowHelper(dv, o, len / 2, col, head, head * 0.45);
+    ah.traverse(x => { if (x.material) { x.material.depthTest = false; x.renderOrder = 27; } }); App.annotG.add(ah);
+  }
+}
 
 async function massProps() {
   const d = doc(); if (!d?.res) return;
@@ -1367,7 +1682,7 @@ const CMD = {
   datumPlane: () => featDatumPlane(), datumAxis: () => featDatumAxis(), datumPoint: () => featDatumPoint(), sketch: () => featSketch(),
   extrude: () => featExtrude(), revolve: () => featRevolve(), hole: () => featHole(), round: () => featEdge('round'), chamfer: () => featEdge('chamfer'),
   pattern: () => featPattern(), mirror: () => featMirror(), shell: () => featShell(),
-  measure: () => measureDistance(), clearMeasure: () => clearMeasure(), mass: () => massProps(),
+  measure: () => measureDistance(), clearMeasure: () => clearMeasure(), mass: () => massProps(), annotate: () => createAnnotation(),
   fit: () => App.viewer.fit(doc()?.res?.bbox), zoomin: () => App.viewer.zoomAt(1.25), zoomout: () => App.viewer.zoomAt(0.8), repaint: () => App.viewer.request(),
   standard: () => App.viewer.setView('standard', doc()?.res?.bbox), color: () => modelColor(), screenshot: () => screenshot(),
   params: () => paramsDialog(), options: () => optionsDialog(), spacemouse: () => spaceMouseDialog(), help: () => helpDialog(),
@@ -1410,6 +1725,7 @@ function ribbonSpec() {
       { label: 'Formen', items: [{ id: 'extrude', label: 'Extrudieren', icon: 'extrude', big: true }, { id: 'revolve', label: 'Drehen', icon: 'revolve', big: true }] },
       { label: 'Konstruktion', items: [{ id: 'hole', label: 'Bohrung', icon: 'hole', big: true }, { id: 'round', label: 'Rundung', icon: 'round', big: true }, { id: 'chamfer', label: 'Fase', icon: 'chamfer', big: true }, { id: 'shell', label: 'Schale', icon: 'shell', big: true }] },
       { label: 'Editieren', items: [{ id: 'pattern', label: 'Muster', icon: 'pattern', big: true }, { id: 'mirror', label: 'Spiegeln', icon: 'mirror', big: true }] },
+      { label: 'Beschriften', items: [{ id: 'annotate', label: 'Bemaßung', icon: 'dim', big: true }] },
     ],
     analysis: [
       { label: 'Messen', items: [{ id: 'measure', label: 'Messen', icon: 'measure', big: true }, { id: 'clearMeasure', label: 'Messung löschen', icon: 'close' }] },
@@ -1419,7 +1735,7 @@ function ribbonSpec() {
       { label: 'Ausrichtung', items: [{ id: 'fit', label: 'Einpassen', icon: 'fit', big: true }, { id: 'standard', label: 'Standard', icon: 'view', big: true },
         ...['FRONT', 'BACK', 'TOP', 'BOTTOM', 'LEFT', 'RIGHT'].map(v => ({ id: `view:${v}`, label: v, icon: 'view' }))] },
       { label: 'Modelldarstellung', items: [['shadedEdges', 'Schattiert mit Kanten'], ['shaded', 'Schattiert'], ['hidden', 'Keine verdeckten'], ['wire', 'Drahtmodell']].map(([s, l]) => ({ id: `style:${s}`, label: l, icon: 'style', active: App.display.style === s })) },
-      { label: 'Anzeigen', items: [['planes', 'Ebenen'], ['axes', 'Achsen'], ['points', 'Punkte'], ['csys', 'Koord.-Systeme'], ['sketches', 'Skizzen'], ['tags', 'Beschriftungen']].map(([k, l]) => ({ id: `dtm:${k}`, label: l, icon: { planes: 'plane', axes: 'axis', points: 'point', csys: 'csys', sketches: 'sketch', tags: 'datums' }[k], active: App.display[k] })) },
+      { label: 'Anzeigen', items: [['planes', 'Ebenen'], ['axes', 'Achsen'], ['points', 'Punkte'], ['csys', 'Koord.-Systeme'], ['sketches', 'Skizzen'], ['annots', 'Bemaßungen'], ['tags', 'Beschriftungen']].map(([k, l]) => ({ id: `dtm:${k}`, label: l, icon: { planes: 'plane', axes: 'axis', points: 'point', csys: 'csys', sketches: 'sketch', annots: 'dim', tags: 'datums' }[k], active: App.display[k] })) },
       { label: 'Darstellung', items: [{ id: 'color', label: 'Farbe', icon: 'color', big: true }, { id: 'screenshot', label: 'Bild (PNG)', icon: 'camera', big: true }] },
     ],
     tools: [
@@ -1507,7 +1823,7 @@ function partTree(d) {
     const row = el('div', { class: `trow st-${st} ${hidden ? 'hid' : ''} ${App.treeSel === f.id ? 'sel' : ''}`, 'data-id': f.id, title: err ? err.msg : `${FEATURE_INFO[f.type]?.label}${hidden ? ' (ausgeblendet)' : ''}`,
       onclick: () => selectFeature(f), ondblclick: () => editFeature(f),
       oncontextmenu: (e) => { e.preventDefault(); selectFeature(f); featureMenu(e, f, i); } },
-    icon(FEATURE_INFO[f.type]?.icon || 'info'), el('span', { class: 'tn' }, f.name), err ? icon('error', 'ic err') : null, hidden ? icon('eyeoff', 'ic dim') : null);
+    icon(FEATURE_INFO[f.type]?.icon || 'info'), el('span', { class: 'tn' }, f.name), err ? icon('error', 'ic err') : null, hidden ? icon('eyeoff', 'ic faint') : null);
     rows.push(row);
   });
   if (ins >= data.features.length) rows.push(marker());
@@ -1518,8 +1834,9 @@ function selectFeature(f) {
   const d = doc(); App.selHl.clear();
   const tools = d.res?.tools.get(f.id);
   if (tools) for (const t of tools) App.selHl.add(highlightMesh(t.geom, t.op === 'cut' ? 0xff6b6b : 0x29c8ff, 0.22));
-  d.group.traverse(o => { if (o.userData.datumId === f.id) { const c = o.clone(); c.traverse(x => { if (x.material) { x.material = x.material.clone(); x.material.color?.set(0xffb020); if (x.type === 'Mesh') x.material.opacity = 0.08; x.material.depthTest = false; x.renderOrder = 25; } }); App.selHl.add(c); } });
-  if (f.type === 'datumPlane') App.sel = [{ kind: 'plane', ref: f.id, name: f.name }];
+  App.viewer.clearLabels('sel');
+  if (f.type === 'datumPlane') { App.sel = [{ kind: 'plane', ref: f.id, name: f.name }]; planeHl(App.selHl, f.id, f.name); }
+  else d.group.traverse(o => { if (o.userData.datumId === f.id) { const c = o.clone(); c.traverse(x => { if (x.material) { x.material = x.material.clone(); x.material.color?.set(0xffb020); if (x.type === 'Mesh') x.material.opacity = 0.12; x.material.depthTest = false; x.renderOrder = 25; } }); App.selHl.add(c); } });
   if (f.type === 'sketch') App.sel = [{ kind: 'sketch', ref: f.id, name: f.name }];
   App.viewer.request();
 }
@@ -1560,7 +1877,7 @@ function asmTree(d) {
       onclick: () => { highlightTree(c.id); const en = compEntry(c.id); App.selHl.clear(); if (en?.group) { const bb = entryBox(en); if (bb) { const h = new THREE.Box3Helper(bb, 0xffb020); App.selHl.add(h); } } App.sel = [{ kind: 'comp', compId: c.id, name: c.name }]; App.viewer.request(); },
       ondblclick: () => placementDash(c),
       oncontextmenu: (ev) => { ev.preventDefault(); highlightTree(c.id); compMenu(ev, c); } },
-    icon(e?.kind === 'assembly' ? 'assembly' : 'part'), el('span', { class: 'tn' }, c.name), el('span', { class: 'tc' }, n ? `⛓${n}` : ''), e?.error ? icon('error', 'ic err') : null, c.hidden ? icon('eyeoff', 'ic dim') : null);
+    icon(e?.kind === 'assembly' ? 'assembly' : 'part'), el('span', { class: 'tn' }, c.name), el('span', { class: 'tc' }, n ? `⛓${n}` : ''), e?.error ? icon('error', 'ic err') : null, c.hidden ? icon('eyeoff', 'ic faint') : null);
     rows.push(row);
   }
   if (!data.components.length) rows.push(el('div', { class: 'muted pad small' }, 'Noch keine Komponenten. Modell › Einbauen.'));
@@ -1645,7 +1962,7 @@ function bindKeys() {
     const k = e.key.toLowerCase(); const mod = e.ctrlKey || e.metaKey;
     if (App.sketcher) { if (e.key === 'Enter') { /* nichts */ } return; }
     if (e.key === 'Escape') { if (App.picking) clearPick(App.picking.multi ? [] : null); else { App.sel = []; clearSelHl(); highlightTree(null); } return; }
-    if (e.key === 'Enter' && App.picking?.multi) { clearPick([]); return; }
+    if (e.key === 'Enter' && App.picking) { clearPick(App.picking.multi ? [] : null); return; }
     if (mod && k === 's') { e.preventDefault(); runCmd('save'); } else if (mod && k === 'z') { e.preventDefault(); runCmd('undo'); }
     else if (mod && k === 'y') { e.preventDefault(); runCmd('redo'); } else if (mod && k === 'g') { e.preventDefault(); runCmd('regen'); }
     else if (mod && k === 'd') { e.preventDefault(); runCmd('standard'); } else if (mod && k === 'r') { e.preventDefault(); runCmd('repaint'); }

@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.4.0] - 2026-10-15
+### Neu
+- Programmsymbol für exe, Mac-App, Fenster und Programmkopf
+- Eigenes Bemaßungswerkzeug im Skizzierer (Skizze › Bemaßung): Abstand direkt/horizontal/vertikal zwischen Punkten, Rechteckecken und Ursprung, Winkel einer Linie; steuernde Maße per Klick änderbar, Rechtsklick löscht
+- Bemaßung am Körper (Modell › Bemaßung): Kantenlänge, Ø von Kreiskanten, Punktabstand, Abstand paralleler Flächen; bleibt im Modell gespeichert, folgt Änderungen, nicht mehr auffindbare Referenzen werden rot angezeigt (Ansicht › Bemaßungen blendet aus)
+- Während der Bearbeitung eines Features werden die Maße direkt am Modell angezeigt (Tiefe, Winkel, Ø, Versätze, Radius, Wandstärke, Muster, Ebenenversatz, Skizzenmaße) – ein Klick auf das Maß öffnet das Eingabefeld
+- Rundung, Fase und Schale: Vorschau erscheint sofort beim Anklicken der Kanten/Flächen, das Dashboard bleibt offen; beliebig viele Kanten nacheinander wählen, erneuter Klick wählt ab, „Auswahl leeren“
+- Tangentenkette (Standard wie in Creo): tangential anschließende Kanten werden mitgewählt
+- Mehrfachauswahl mit Strg+Klick im Grafikbereich; vorausgewählte Kanten werden von Rundung/Fase übernommen
+### Geändert
+- Gewählte Ebene deutlich hervorgehoben (Füllung, kräftiger Rand, Namensschild); im Skizzierer zeigt ein Schild die Skizzierebene
+- Alle Maße in mm bzw. ° mit sichtbarer Einheit (Dashboard, Skizzierer, Maße im Grafikbereich, Messen, Verschieben-Dialog)
+- Kanten von Rundung/Fase werden nach Maßänderungen (z. B. andere Extrusionstiefe) wiedergefunden
+- Scheitert eine Rundung über mehrere Kanten in einem Schritt, verrundet der Kern Kante für Kante
+
 ## [1.3.0] - 2026-10-15
 ### Geändert
 - Neuer Programmname **CAD-Studio-MK1**: Fenster, exe/App, Dateinamen, Einstellungsordner (`~/.cad-studio-mk1`), Umgebungsvariablen (`CADSTUDIO_*`)

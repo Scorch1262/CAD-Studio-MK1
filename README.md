@@ -1,4 +1,4 @@
-# CAD-Studio-MK1 1.3.0
+# CAD-Studio-MK1 1.4.0
 
 Eigenständiges 3D-CAD-Programm für Windows und macOS im dunklen Dashboard-Stil, dessen Bedienung sich an
 **PTC Creo Parametric** orientiert: Menüband mit Registerkarten, Modellbaum mit Einfügemarke, Feature-Dashboard
@@ -39,11 +39,13 @@ Ein zweiter Start holt das bereits laufende Fenster nach vorn.
 ### Part-Modellierung (Feature-Historie, parametrisch)
 - **Bezüge:** Standard-Ebenen RIGHT/TOP/FRONT, PRT_CSYS_DEF, Bezugsebene (Versatz/Winkel zu Ebene oder Fläche), Bezugsachse (Schnitt zweier Ebenen oder Punkt+Richtung), Bezugspunkt
 - **Skizze (eigenständig):** Skizze als eigenes Element im Modellbaum auf Ebene oder ebener Fläche anlegen; danach mit Extrudieren/Drehen verwenden (auch mehrfach). Auswahl im Modellbaum, im Grafikbereich oder im Dashboard; verwendete Skizzen werden wie in Creo ausgeblendet
-- **Skizzierer:** Linie (Kette), Rechteck (mit Eckenradius), Kreis, Bogen (3 Punkte), Mittellinie, Polygon, Langloch, Verrundung, Kante übernehmen; Fangen an Punkten/Raster/Referenzen; Maße im Grafikbereich anklicken und ändern; Konstruktionselemente
+- **Skizzierer:** Linie (Kette), Rechteck (mit Eckenradius), Kreis, Bogen (3 Punkte), Mittellinie, Polygon, Langloch, Verrundung, Kante übernehmen; Fangen an Punkten/Raster/Referenzen; Maße im Grafikbereich anklicken und ändern; **Bemaßungswerkzeug** für steuernde Abstands-, Horizontal-, Vertikal- und Winkelmaße; Konstruktionselemente
 - **Formen:** Extrudieren (eine Seite / symmetrisch / beide Seiten / durch alles, hinzufügen/entfernen, Richtung ins Material wird wie in Creo automatisch vorgeschlagen), Drehen (um Mittellinie)
-- **Konstruktion:** Bohrung (Platzierung per Klick auf Fläche, Ø, Tiefe/durch, Bohrerspitze, zylindrische/kegelige Senkung), Rundung und Fase an beliebigen Kanten (gerade und gekrümmt, konvex und konkav), Schale (Flächen entfernen, Wandstärke)
+- **Konstruktion:** Bohrung (Platzierung per Klick auf Fläche, Ø, Tiefe/durch, Bohrerspitze, zylindrische/kegelige Senkung), Rundung und Fase an beliebigen Kanten (gerade und gekrümmt, konvex und konkav; mehrere Kanten nacheinander anklicken, Tangentenkette, Vorschau sofort beim Anklicken), Schale (Flächen entfernen, Wandstärke)
 - **Editieren:** Muster (Richtung, 2 Richtungen, Achse), Spiegeln (Feature oder gesamte Geometrie)
 - **Modellbaum:** Definition editieren (Doppelklick), Umbenennen, Unterdrücken/Fortsetzen, Ausblenden, Löschen mit Abhängigkeiten, **Hier einfügen** (Einfügemarke/Rollback)
+- **Maße am Modell:** beim Bearbeiten eines Features werden seine Maße (mm/°) am Modell eingeblendet und lassen sich anklicken und ändern
+- **Bemaßung am Körper:** Kantenlänge, Ø, Punkt- und Flächenabstand als gespeicherte Referenzmaße (Modell › Bemaßung)
 - **Parameter & Relationen:** in jedem Maßfeld nutzbar, z. B. `L/2+5`, `sqrt(A^2+B^2)`
 - Rückgängig/Wiederherstellen, Regenerieren mit Fehleranzeige im Baum
 
@@ -106,6 +108,7 @@ erlauben. Im Browser-Modus wird ersatzweise WebHID (Chrome/Edge) verwendet.
 | Speichern, Rückgängig, Wiederherstellen | Strg+S, Strg+Z, Strg+Y |
 | Regenerieren, Standardausrichtung, Neu zeichnen | Strg+G, Strg+D, Strg+R |
 | Abbrechen / Gewähltes Feature löschen | Esc / Entf |
+| Mehrfachauswahl (z. B. Kanten) | Strg + Links |
 
 ### Vom Skizzieren zum 3D-Körper
 
@@ -119,6 +122,14 @@ erlauben. Im Browser-Modus wird ersatzweise WebHID (Chrome/Edge) verwendet.
 Eine vorhandene Skizze kann auch später verwendet werden: im Modellbaum oder im Grafikbereich anklicken und
 *Extrudieren*/*Drehen* wählen, per Rechtsklick › „Extrudieren mit dieser Skizze“ oder im Dashboard unter „Skizze“.
 Ändert man die Skizze (Doppelklick im Modellbaum), folgen alle Körper, die sie verwenden.
+
+**Maße:** Alle Maße sind in Millimetern (Winkel in Grad), die Einheit wird immer angezeigt. Während ein Feature oder
+eine Skizze bearbeitet wird, stehen die Maße am Modell – Klick auf ein Maß, Wert eintippen (auch Ausdrücke wie `L/2`),
+Enter. Im Skizzierer legt das Werkzeug *Bemaßung* zusätzliche steuernde Maße an: zwei Punkte anklicken und
+Abstand/Horizontal/Vertikal wählen, oder eine Linie anklicken für ihren Winkel.
+
+**Rundung/Fase:** Werkzeug wählen und Kanten nacheinander anklicken – die Vorschau erscheint sofort. Bei aktiver
+Tangentenkette werden tangential anschließende Kanten mitgenommen. Kanten können auch vorher mit Strg+Klick gewählt werden.
 
 **Weg 2 – Skizze im Feature:** Ebene/Fläche wählen → *Extrudieren* → Skizze zeichnen → **OK** → Tiefe → **✔**.
 
@@ -182,6 +193,7 @@ Offenes JSON, lesbar und versionierbar:
 }
 ```
 
+Referenzmaße am Körper stehen in `annotations` (Typ `len`, `dia`, `dist`, `pdist`).
 Baugruppen (`cadstudio-assembly`) enthalten `components` mit relativem Dateipfad, 4×4-Matrix und Bedingungen.
 Beim Speichern bleibt die Vorversion als `*.bak` erhalten.
 
@@ -196,6 +208,9 @@ Baugruppen werden angepasst); einzeln geöffnete Altdateien werden beim Speicher
 Abhängigkeiten: Flask, Waitress, pywebview, hidapi, usd-brep (`requirements.txt`; Python **3.12** erforderlich, da usd-brep nur dafür angeboten wird). Der Workflow `.github/workflows/build-release.yml` läuft bei jedem Push auf `main`/`master`, bei Tags `v*`
 und manuell. Er prüft den usd-brep-Kern (Selbsttest im Quellcode und in der fertigen exe), baut mit PyInstaller (`CAD-Studio-MK1.spec`) und erzeugt ein Release
 `v<VERSION>-build<Nummer>` (bzw. den Tag-Namen) mit beiden Paketen. Die Version steht in `VERSION`.
+
+Das Programmsymbol liegt unter `assets/` (`icon.svg` als Vorlage, `icon.ico` für Windows, `icon.icns` für macOS,
+`icon-256.png` für das Fenster) und wird von PyInstaller in exe und App eingebunden.
 
 Lokal: `pip install -r requirements.txt pyinstaller` und `pyinstaller --noconfirm CAD-Studio-MK1.spec`.
 

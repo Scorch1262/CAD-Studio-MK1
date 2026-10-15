@@ -2,6 +2,8 @@
 import * as THREE from '../vendor/three.module.js';
 import * as G from './geom.js';
 import { el, fmt, uid, evalExpr } from './util.js';
+import { MM, DEG, parseDimInput, entityDims, handlesOf as dimHandles, handlePoints, setHandle, sketchDimValue } from './dims.js';
+import { contextMenu } from './ui.js';
 
 const COL = { ent: 0x7fd4ff, sel: 0xffb020, cons: 0x8a95a5, ref: 0x5c6b7d, prev: 0xffe066, center: 0xb48cff };
 const nice = (x) => { const e = Math.pow(10, Math.floor(Math.log10(x))); const m = x / e; return (m < 1.5 ? 1 : m < 3.5 ? 2 : m < 7.5 ? 5 : 10) * e; };
@@ -9,18 +11,22 @@ const nice = (x) => { const e = Math.pow(10, Math.floor(Math.log10(x))); const m
 export const SKETCH_TOOLS = [
   ['select', 'Auswählen', 'select'], ['line', 'Linie', 'line'], ['rect', 'Rechteck', 'rect'], ['circle', 'Kreis', 'circle'],
   ['arc', 'Bogen (3 Punkte)', 'arc'], ['centerline', 'Mittellinie', 'centerline'], ['polygon', 'Polygon', 'polygon'],
-  ['slot', 'Langloch', 'slot'], ['fillet', 'Verrundung', 'round'], ['project', 'Kante übernehmen', 'project'],
+  ['slot', 'Langloch', 'slot'], ['fillet', 'Verrundung', 'round'], ['project', 'Kante übernehmen', 'project'], ['dim', 'Bemaßung', 'dim'],
 ];
 
 export class Sketcher {
-  constructor({ viewer, frame, entities, params, refsEdges, panel, status, onChange, ask }) {
+  constructor({ viewer, frame, entities, params, refsEdges, panel, status, onChange, ask, dims, planeName }) {
+    this.dims = (dims || []).map(d => JSON.parse(JSON.stringify(d)));
+    this.planeName = planeName || 'Skizzierebene';
+    this.badge = el('div', { class: 'plane-badge' }, el('span', { class: 'pb-k' }, 'Skizzierebene'), el('b', {}, this.planeName));
+    viewer.el.append(this.badge);
     this.ask = ask || (async (t, l, v) => prompt(l, v));
     this.v = viewer; this.frame = frame; this.params = params || {};
     this.entities = (entities || []).map(e => ({ ...e, id: e.id || uid('e') }));
     this.panel = panel; this.status = status || (() => {}); this.onChange = onChange || (() => {});
     this.group = new THREE.Group(); this.group.renderOrder = 10; viewer.overlay.add(this.group);
-    this.gEnt = new THREE.Group(); this.gPrev = new THREE.Group(); this.gGrid = new THREE.Group(); this.gRef = new THREE.Group();
-    this.group.add(this.gGrid, this.gRef, this.gEnt, this.gPrev);
+    this.gEnt = new THREE.Group(); this.gPrev = new THREE.Group(); this.gGrid = new THREE.Group(); this.gRef = new THREE.Group(); this.gDim = new THREE.Group();
+    this.group.add(this.gGrid, this.gRef, this.gEnt, this.gDim, this.gPrev);
     this.tool = 'line'; this.pts = []; this.sel = new Set(); this.gridSnap = true; this.polyN = 6;
     this.undoStack = [];
     // Referenzen: Kanten in der Skizzenebene
@@ -44,6 +50,7 @@ export class Sketcher {
   }
 
   dispose() {
+    this.badge.remove();
     this.v.overlay.remove(this.group); this.v.inputCapture = null; this.v.onFrame = this.prevFrame;
     window.removeEventListener('keydown', this._key); this.v.clearLabels('sketch'); this.v.request();
   }
@@ -128,6 +135,7 @@ export class Sketcher {
       if (pts.length) { const o = this.lineObj(pts, color, e.type === 'centerline' || !!e.construction); o.userData.entId = id; this.gEnt.add(o); }
       this.dimLabels(e, i);
     });
+    this.drawDims();
     // Punkte
     const kp = this.keyPoints().filter(k => !k.kind);
     const g = new THREE.BufferGeometry().setFromPoints(kp.map(k => this.to3(k.x, k.y)));
@@ -138,44 +146,136 @@ export class Sketcher {
     this.status(msg);
   }
 
-  /** Bemaßungen als anklickbare Beschriftung */
+  /** Bemaßungen als anklickbare Beschriftung (alle Laengen in mm) */
   dimLabels(e, i) {
     const src = this.entities[i];
-    const L = (txt, x, y, apply) => {
-      const l = this.v.addLabel(txt, this.to3(x, y), 'dim', 'sketch');
-      l.el.title = 'Klicken zum Ändern (Zahl oder Ausdruck)';
-      l.el.addEventListener('pointerdown', (ev) => { ev.stopPropagation(); this.editDim(l.el, txt, apply); });
-    };
-    const fmtv = (k, v) => (typeof src[k] === 'string' && !/^[-\d.]+$/.test(src[k]) ? `${src[k]}=` : '') + fmt(v, 2);
-    if (e.type === 'rect') {
-      L(fmtv('w', Math.abs(e.w)), e.x + e.w / 2, Math.min(e.y, e.y + e.h) - this.v.pxToWorld(14), (v) => { src.w = v; });
-      L(fmtv('h', Math.abs(e.h)), Math.max(e.x, e.x + e.w) + this.v.pxToWorld(18), e.y + e.h / 2, (v) => { src.h = v; });
-      if (e.r) L('R' + fmt(e.r, 2), e.x + e.w, e.y + e.h, (v) => { src.r = v; });
-    } else if (e.type === 'circle') L('Ø' + fmtv('r', e.r * 2), e.cx + e.r * 0.7, e.cy + e.r * 0.7, (v) => { src.r = typeof v === 'number' ? v / 2 : `(${v})/2`; });
-    else if (e.type === 'arc') L('R' + fmtv('r', e.r), e.cx, e.cy, (v) => { src.r = v; });
-    else if (e.type === 'polygon') L(`${e.n}-Eck R${fmt(e.r, 2)}`, e.cx, e.cy - e.r - this.v.pxToWorld(12), (v) => { src.r = v; });
-    else if (e.type === 'slot') L('R' + fmt(e.r, 2), (e.x1 + e.x2) / 2, (e.y1 + e.y2) / 2 + e.r + this.v.pxToWorld(12), (v) => { src.r = v; });
-    else if (e.type === 'line') {
-      const len = Math.hypot(e.x2 - e.x1, e.y2 - e.y1);
-      L(fmt(len, 2), (e.x1 + e.x2) / 2, (e.y1 + e.y2) / 2, (v) => {
-        const nl = typeof v === 'number' ? v : evalExpr(v, this.params); const k = nl / (len || 1);
-        const ox = src.x2, oy = src.y2; const nx = e.x1 + (e.x2 - e.x1) * k, ny = e.y1 + (e.y2 - e.y1) * k;
-        src.x2 = +nx.toFixed(6); src.y2 = +ny.toFixed(6); this.movePoint(ox, oy, nx, ny, src);
-      });
+    for (const d of entityDims(src, e, this.v.pxToWorld(14), this.params, (ox, oy, nx, ny, ex) => this.movePoint(ox, oy, nx, ny, ex))) {
+      const l = this.v.addLabel(d.text, this.to3(d.x, d.y), 'dim', 'sketch');
+      l.el.title = 'Klicken zum Ändern (Wert in mm oder Ausdruck)';
+      l.el.addEventListener('pointerdown', (ev) => { ev.stopPropagation(); this.editDim(l.el, d.start, d.apply); });
     }
   }
-  editDim(labelEl, txt, apply) {
-    const inp = el('input', { class: 'dim-edit', value: txt.replace(/^[ØR]/, '').replace(/^.*=/, '') });
-    labelEl.replaceChildren(inp); inp.focus(); inp.select();
+  editDim(labelEl, start, apply) {
+    const inp = el('input', { class: 'dim-edit', value: start });
+    labelEl.replaceChildren(inp, el('span', { class: 'dim-unit' }, 'mm')); setTimeout(() => { inp.focus(); inp.select(); }, 0);
+    let finished = false;
     const done = (ok) => {
+      if (finished) return; finished = true;
       if (ok) {
-        const s = inp.value.trim();
-        try { const n = evalExpr(s, this.params); this.pushUndo(); apply(/^[-\d.,]+$/.test(s) ? n : s); }
+        try { const v = parseDimInput(inp.value, this.params); this.pushUndo(); apply(v); }
         catch (err) { this.status(err.message); }
       }
       this.changed();
     };
     inp.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') done(true); if (e.key === 'Escape') done(false); });
+    inp.addEventListener('pointerdown', (e) => e.stopPropagation());
+    inp.addEventListener('blur', () => done(true), { once: true });
+  }
+
+  // ------------------------------------------------------------ Bemassungswerkzeug (steuernde Masse)
+  /** Punkt einer Massreferenz {origin} | {ent, h} in Skizzenkoordinaten */
+  refPoint(ref) {
+    if (!ref) return null;
+    if (ref.origin) return { x: 0, y: 0 };
+    const i = this.entities.findIndex(e => e.id === ref.ent); if (i < 0) return null;
+    const e = this.resolved()[i]; const pt = handlePoints(e)[ref.h]; return pt ? { ...pt } : null;
+  }
+  /** naechster Griffpunkt (Endpunkt, Mittelpunkt, Ecke) oder Ursprung */
+  pickHandle(p) {
+    const tol = this.v.pxToWorld(10); let best = null, bd = tol;
+    if (Math.hypot(p.x, p.y) < bd) { best = { origin: true }; bd = Math.hypot(p.x, p.y); }
+    this.resolved().forEach((e, i) => {
+      handlePoints(e).forEach((pt, h) => { const d = Math.hypot(pt.x - p.x, pt.y - p.y); if (d < bd) { bd = d; best = { ent: this.entities[i].id, h }; } });
+    });
+    return best;
+  }
+  dimClick(ev, p) {
+    const raw = this.to2(this.v.rayToPlane(ev, this.frame) || this.to3(p.x, p.y)); const q = { x: raw.x, y: raw.y };
+    const h = this.pickHandle(q);
+    if (!this.dimA) {
+      if (h) { this.dimA = h; this.status('Bemaßung: zweiten Punkt (oder Ursprung) anklicken – Esc bricht ab', 'pick'); this.redraw(); return; }
+      const ent = this.hitEntity(q);
+      if (ent?.type === 'line') { this.addDim({ type: 'angle', a: { ent: ent.id, h: 0 } }); return; }
+      this.status('Bemaßung: Punkt (Endpunkt, Mittelpunkt, Ecke, Ursprung) oder Linie (Winkel) anklicken'); return;
+    }
+    if (!h || JSON.stringify(h) === JSON.stringify(this.dimA)) { this.status('Bitte einen anderen Punkt wählen'); return; }
+    const a = this.dimA; this.dimA = null;
+    const r = this.v.renderer.domElement.getBoundingClientRect();
+    const mk = (type) => this.addDim(h.origin ? { type, a: h, b: a } : { type, a, b: h });
+    contextMenu(ev.clientX ?? r.left + 20, ev.clientY ?? r.top + 20, [
+      { label: 'Abstand (direkt)', icon: 'dim', action: () => mk('dist') },
+      { label: 'Horizontaler Abstand', icon: 'dim', action: () => mk('hdist') },
+      { label: 'Vertikaler Abstand', icon: 'dim', action: () => mk('vdist') },
+    ]);
+    this.redraw();
+  }
+  addDim(d) { this.pushUndo(); d.id = uid('d'); this.dims.push(d); this.changed(); this.status(`Maß angelegt – Wert anklicken zum Ändern`); }
+  /** Steuerndes Mass auf neuen Wert setzen: zweiten Punkt verschieben (bzw. Linie drehen) */
+  driveDim(d, v) {
+    if (typeof v !== 'number') v = evalExpr(v, this.params);
+    if (d.type === 'angle') {
+      const i = this.entities.findIndex(e => e.id === d.a.ent); if (i < 0) return;
+      const e = this.resolved()[i]; const src = this.entities[i];
+      const len = Math.hypot(e.x2 - e.x1, e.y2 - e.y1); const t = v * Math.PI / 180;
+      const nx = e.x1 + len * Math.cos(t), ny = e.y1 + len * Math.sin(t);
+      this.movePoint(Number(e.x2), Number(e.y2), nx, ny, src); src.x2 = +nx.toFixed(6); src.y2 = +ny.toFixed(6); return;
+    }
+    if (!(v >= 0)) throw new Error('Abstand muss ≥ 0 mm sein');
+    const moveRef = d.b.origin ? d.a : d.b; const fixRef = d.b.origin ? d.b : d.a;
+    const A = this.refPoint(fixRef), B = this.refPoint(moveRef); if (!A || !B) return;
+    let nb = { ...B };
+    if (d.type === 'hdist') nb.x = A.x + (Math.sign(B.x - A.x) || 1) * v;
+    else if (d.type === 'vdist') nb.y = A.y + (Math.sign(B.y - A.y) || 1) * v;
+    else { const L = Math.hypot(B.x - A.x, B.y - A.y); const ux = L ? (B.x - A.x) / L : 1, uy = L ? (B.y - A.y) / L : 0; nb = { x: A.x + ux * v, y: A.y + uy * v }; }
+    const i = this.entities.findIndex(e => e.id === moveRef.ent); if (i < 0) return;
+    const src = this.entities[i];
+    if (src.type !== 'rect') this.movePoint(B.x, B.y, nb.x, nb.y, src);
+    setHandle(src, this.resolved()[i], moveRef.h, nb.x, nb.y, fixRef.ent === moveRef.ent);
+  }
+  drawDims() {
+    this.gDim.clear();
+    this.dims = this.dims.filter(d => this.refPoint(d.a) && (d.type === 'angle' || this.refPoint(d.b)));
+    const col = 0xffb020;
+    for (const d of this.dims) {
+      const val = sketchDimValue(d, (r) => this.refPoint(r)); if (val === null) continue;
+      const A = this.refPoint(d.a); let pos;
+      if (d.type === 'angle') {
+        const i = this.entities.findIndex(e => e.id === d.a.ent); const e = this.resolved()[i];
+        const r = Math.hypot(e.x2 - e.x1, e.y2 - e.y1) * 0.35; const a1 = Math.atan2(e.y2 - e.y1, e.x2 - e.x1);
+        this.gDim.add(this.lineObj(G.arcPoints(A.x, A.y, r, Math.min(0, a1), Math.max(0, a1), 32), col, true));
+        this.gDim.add(this.lineObj([{ x: A.x, y: A.y }, { x: A.x + r * 1.2, y: A.y }], col, true));
+        pos = { x: A.x + r * Math.cos(a1 / 2) * 1.25, y: A.y + r * Math.sin(a1 / 2) * 1.25 };
+      } else {
+        const B = this.refPoint(d.b);
+        let pa = A, pb = B;
+        if (d.type === 'hdist') { pa = { x: A.x, y: B.y }; this.gDim.add(this.lineObj([A, pa], col, true)); }
+        if (d.type === 'vdist') { pa = { x: B.x, y: A.y }; this.gDim.add(this.lineObj([A, pa], col, true)); }
+        this.gDim.add(this.lineObj([pa, pb], col));
+        pos = { x: (pa.x + pb.x) / 2, y: (pa.y + pb.y) / 2 };
+      }
+      const txt = d.type === 'angle' ? DEG(val) : `${d.type === 'hdist' ? '↔ ' : d.type === 'vdist' ? '↕ ' : ''}${MM(val)}`;
+      const l = this.v.addLabel(txt, this.to3(pos.x, pos.y), 'dim drv', 'sketch');
+      l.el.title = 'Steuerndes Maß – Klicken zum Ändern, Rechtsklick löscht';
+      l.el.addEventListener('pointerdown', (ev) => {
+        ev.stopPropagation();
+        if (ev.button === 2) { this.pushUndo(); this.dims = this.dims.filter(x => x !== d); this.changed(); return; }
+        this.editDimDrv(l.el, d, val);
+      });
+      l.el.addEventListener('contextmenu', (ev) => ev.preventDefault());
+    }
+    if (this.dimA) { const A = this.refPoint(this.dimA); if (A) { const m = new THREE.Points(new THREE.BufferGeometry().setFromPoints([this.to3(A.x, A.y)]), new THREE.PointsMaterial({ color: col, size: 10, sizeAttenuation: false, depthTest: false })); m.renderOrder = 22; this.gDim.add(m); } }
+  }
+  editDimDrv(labelEl, d, val) {
+    const inp = el('input', { class: 'dim-edit', value: fmt(val, 4) });
+    labelEl.replaceChildren(inp, el('span', { class: 'dim-unit' }, d.type === 'angle' ? '°' : 'mm')); setTimeout(() => { inp.focus(); inp.select(); }, 0);
+    let finished = false;
+    const done = (ok) => {
+      if (finished) return; finished = true;
+      if (ok) { try { const v = parseDimInput(inp.value, this.params); this.pushUndo(); this.driveDim(d, v); } catch (err) { this.status(err.message); } }
+      this.changed();
+    };
+    inp.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') done(true); if (e.key === 'Escape') done(false); });
+    inp.addEventListener('pointerdown', (e) => e.stopPropagation());
     inp.addEventListener('blur', () => done(true), { once: true });
   }
 
@@ -196,10 +296,12 @@ export class Sketcher {
     select: 'Element anklicken; Punkte ziehen; Entf löscht', line: 'Punkte klicken – Doppelklick/Esc beendet die Kette',
     rect: 'Zwei Eckpunkte klicken', circle: 'Mittelpunkt, dann Radius', arc: 'Startpunkt, Endpunkt, dann Punkt auf dem Bogen',
     centerline: 'Zwei Punkte für die Mittellinie (Rotationsachse)', polygon: 'Mittelpunkt, dann Eckpunkt', slot: 'Mittelpunkt 1, Mittelpunkt 2, dann Radius',
-    fillet: 'Ecke zwischen zwei Linien anklicken', project: 'Blaue Referenzkante anklicken, um sie als Linie zu übernehmen' };
+    fillet: 'Ecke zwischen zwei Linien anklicken', project: 'Blaue Referenzkante anklicken, um sie als Linie zu übernehmen',
+    dim: 'Bemaßung: zwei Punkte (Endpunkte, Mittelpunkte, Ecken, Ursprung) für einen Abstand oder eine Linie für ihren Winkel anklicken' };
+    this.dimA = null;
     this.status(hints[t] || ''); }
-  pushUndo() { this.undoStack.push(JSON.stringify(this.entities)); if (this.undoStack.length > 100) this.undoStack.shift(); }
-  undo() { const s = this.undoStack.pop(); if (s) { this.entities = JSON.parse(s); this.sel.clear(); this.changed(); } }
+  pushUndo() { this.undoStack.push(JSON.stringify({ e: this.entities, d: this.dims })); if (this.undoStack.length > 100) this.undoStack.shift(); }
+  undo() { const s = this.undoStack.pop(); if (s) { const o = JSON.parse(s); this.entities = o.e; this.dims = o.d || []; this.sel.clear(); this.changed(); } }
   add(e) { this.pushUndo(); e.id = uid('e'); this.entities.push(e); this.changed(); return e; }
   changed() { this.redraw(); this.renderPanel(); this.onChange(this.entities); }
 
@@ -234,6 +336,7 @@ export class Sketcher {
     if (t === 'select') { this.selectAt(ev, p); return; }
     if (t === 'fillet') { this.filletAt(p); return; }
     if (t === 'project') { this.projectAt(p); return; }
+    if (t === 'dim') { this.dimClick(ev, p); return; }
     this.pts.push(p);
     const need = { line: 0, centerline: 2, rect: 2, circle: 2, polygon: 2, slot: 3, arc: 3 }[t];
     if (t === 'line') {
@@ -251,7 +354,7 @@ export class Sketcher {
     }
   }
   dblclick() { if (this.tool === 'line') { this.pts = []; this.gPrev.clear(); this.v.request(); } }
-  context() { if (this.pts.length) { this.pts = []; this.gPrev.clear(); this.v.request(); } else this.setTool('select'); }
+  context() { if (this.dimA) { this.dimA = null; this.redraw(); return; } if (this.pts.length) { this.pts = []; this.gPrev.clear(); this.v.request(); } else this.setTool('select'); }
 
   hitEntity(p) {
     const tol = this.v.pxToWorld(8); let best = null, bd = tol;
@@ -325,6 +428,7 @@ export class Sketcher {
   toggleConstruction() { this.pushUndo(); for (const e of this.entities) if (this.sel.has(e.id)) e.construction = !e.construction; this.changed(); }
   key(e) {
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
+    if (e.key === 'Escape' && this.dimA) { this.dimA = null; this.redraw(); return; }
     if (e.key === 'Escape') { if (this.pts.length) { this.pts = []; this.gPrev.clear(); this.v.request(); } else this.setTool('select'); }
     else if (e.key === 'Delete' || e.key === 'Backspace') this.deleteSelected();
     else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); e.stopPropagation(); this.undo(); }
@@ -340,7 +444,7 @@ export class Sketcher {
       const f = FIELDS[e.type] || [];
       return el('div', { class: `sk-ent ${this.sel.has(e.id) ? 'sel' : ''}`, onclick: (ev) => { if (ev.target.tagName === 'INPUT') return; if (!ev.ctrlKey) this.sel.clear(); this.sel.add(e.id); this.redraw(); this.renderPanel(); } },
         el('div', { class: 'sk-ent-h' }, `${i + 1}. ${NAMES[e.type] || e.type}${e.construction ? ' (Konstruktion)' : ''}`),
-        el('div', { class: 'sk-fields' }, f.map(k => el('label', {}, k, el('input', { value: typeof e[k] === 'number' ? fmt(e[k], 4) : e[k] ?? '', onchange: (ev) => {
+        el('div', { class: 'sk-fields' }, f.map(k => el('label', {}, `${k} ${['a0', 'a1', 'rot'].includes(k) ? '[°]' : k === 'n' ? '' : '[mm]'}`, el('input', { value: typeof e[k] === 'number' ? fmt(e[k], 4) : e[k] ?? '', onchange: (ev) => {
           const s = ev.target.value.trim(); try { const n = evalExpr(s, this.params); this.pushUndo();
             const num = (v) => evalExpr(v, this.params); const j = /^[xy][12]$/.test(k) ? k[1] : null;
             const old = j ? { x: num(e['x' + j]), y: num(e['y' + j]) } : null;
@@ -350,6 +454,7 @@ export class Sketcher {
     });
     this.panel.replaceChildren(
       el('div', { class: 'panel-h' }, 'Skizzenelemente'),
+      el('div', { class: 'sk-plane' }, 'Skizzierebene: ', el('b', {}, this.planeName)),
       el('div', { class: 'sk-tools' },
         el('label', { class: 'chk' }, el('input', { type: 'checkbox', checked: this.gridSnap, onchange: (e) => { this.gridSnap = e.target.checked; } }), 'Raster fangen'),
         el('label', {}, 'Polygon-Ecken ', el('input', { type: 'number', min: 3, max: 64, value: this.polyN, style: 'width:52px', onchange: (e) => { this.polyN = Math.max(3, +e.target.value || 6); } })),
@@ -357,6 +462,10 @@ export class Sketcher {
           el('button', { class: 'btn sm', onclick: () => this.toggleConstruction(), disabled: !this.sel.size }, 'Konstruktion an/aus'),
           el('button', { class: 'btn sm', onclick: () => this.deleteSelected(), disabled: !this.sel.size }, 'Löschen'),
           el('button', { class: 'btn sm', onclick: () => this.undo() }, 'Rückgängig'))),
+      this.dims.length ? el('div', { class: 'sk-dims' }, el('div', { class: 'sk-ent-h' }, `Steuernde Maße (${this.dims.length})`),
+        this.dims.map(d => { const v = sketchDimValue(d, (r) => this.refPoint(r)); const nm = { dist: 'Abstand', hdist: 'Horizontal', vdist: 'Vertikal', angle: 'Winkel' }[d.type];
+          return el('div', { class: 'sk-dim' }, el('span', {}, `${nm}: ${v === null ? '–' : d.type === 'angle' ? DEG(v) : MM(v)}`),
+            el('button', { class: 'x', title: 'Maß löschen', onclick: () => { this.pushUndo(); this.dims = this.dims.filter(x => x !== d); this.changed(); } }, '×')); })) : null,
       el('div', { class: 'sk-list' }, rows.length ? rows : el('div', { class: 'muted' }, 'Noch keine Elemente. Werkzeug im Menüband wählen.')),
       el('div', { class: 'muted small' }, 'Werte akzeptieren Zahlen oder Parameter-Ausdrücke (z. B. L/2). Shift hält das Fangen aus.'));
   }

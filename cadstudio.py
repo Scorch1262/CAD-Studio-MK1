@@ -775,7 +775,12 @@ def run_desktop(url: str) -> bool:
     storage = CONFIG_DIR / "webview"
     storage.mkdir(parents=True, exist_ok=True)
     try:
-        webview.start(private_mode=False, storage_path=str(storage), debug=bool(os.environ.get("CADSTUDIO_DEBUG")))
+        icon = RES / "assets" / "icon-256.png"
+        opts = dict(private_mode=False, storage_path=str(storage), debug=bool(os.environ.get("CADSTUDIO_DEBUG")))
+        try:
+            webview.start(**opts, icon=str(icon) if icon.is_file() else None)  # Fenstersymbol (GTK/Qt)
+        except TypeError:  # aeltere pywebview-Version ohne icon-Parameter
+            webview.start(**opts)
     except Exception as e:  # noqa: BLE001
         print(f"Programmfenster konnte nicht geoeffnet werden ({e}) - verwende Browser.")
         WINDOW = None

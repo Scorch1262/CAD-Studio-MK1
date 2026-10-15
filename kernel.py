@@ -312,6 +312,53 @@ class Builder:
         self.place(tool, o["o"], X, Y)
         self.apply(o["fid"], tool, "cut")
 
+    @staticmethod
+    def _edge_sig(e):
+        t0, t1 = e.parameter_range()
+        a, b, m = _v(e.point_at(t0)), _v(e.point_at(t1)), _v(e.point_at((t0 + t1) / 2))
+        try:
+            ln = float(e.length())
+        except Exception:  # noqa: BLE001
+            ln = math.dist(a, b)
+        return a, b, m, ln
+
+    def _match_edge(self, ref, all_edges):
+        """Kante wiederfinden, wenn sie sich durch eine Massaenderung verschoben hat:
+        1. gleiche Laenge und Richtung (nur verschoben), 2. gleiche Richtung, naechste Mitte."""
+        if not ref.get("a") or not ref.get("b"):
+            return None
+        ra, rb, rm = _v(ref["a"]), _v(ref["b"]), _v(ref["mid"])
+        rlen = float(ref.get("len") or math.dist(ra, rb))
+        rdir = _sub(rb, ra)
+        closed = math.dist(ra, rb) < 1e-6 * (1 + rlen)
+        size = self.size()
+        best = [None, None]
+        bestd = [float("inf"), float("inf")]
+        for e in all_edges:
+            try:
+                a, b, m, ln = self._edge_sig(e)
+            except Exception:  # noqa: BLE001
+                continue
+            d = _sub(b, a)
+            if closed:
+                same_dir = math.dist(a, b) < 1e-6 * (1 + ln)
+            else:
+                nd, nr = math.sqrt(_dot(d, d)), math.sqrt(_dot(rdir, rdir))
+                if nd < 1e-12 or nr < 1e-12:
+                    continue
+                same_dir = abs(_dot(d, rdir)) / (nd * nr) > 0.99999
+            if not same_dir:
+                continue
+            dist = math.dist(m, rm)
+            tier = 0 if abs(ln - rlen) <= max(1e-4, rlen * 1e-5) else 1
+            if dist < bestd[tier]:
+                bestd[tier], best[tier] = dist, e
+        if best[0] is not None and bestd[0] < size:
+            return best[0]
+        if best[1] is not None and bestd[1] < size * 0.25:
+            return best[1]
+        return None
+
     def find_edges(self, refs):
         sm = self.sm
         edges = []
@@ -326,7 +373,9 @@ class Builder:
             except Exception:  # noqa: BLE001
                 dist = 0.0
             if dist > max(1e-3, self.size() * 1e-4):
-                raise BuildError("Gewaehlte Kante existiert nicht mehr (Modell geaendert) - Kanten neu waehlen")
+                e = self._match_edge(ref, all_edges)
+                if e is None:
+                    raise BuildError("Gewaehlte Kante existiert nicht mehr (Modell geaendert) - Kanten neu waehlen")
             if all(e is not x for x in edges):
                 edges.append(e)
         return edges
@@ -340,22 +389,36 @@ class Builder:
             raise BuildError("Wert muss > 0 sein")
         if not o.get("edges"):
             raise BuildError("Keine Kanten gewaehlt")
-        work = self.body.copy()
-        before = work.volume()
         keep = self.body
-        self.body = work
+        xs = 0 if chamfer else 1
+
+        def attempt(groups):
+            cur = keep
+            for g in groups:
+                work = cur.copy()
+                self.body = work  # find_edges sucht im aktuellen Koerper
+                edges = self.find_edges(g)
+                sm.fillet_edges(work, edges, radius=s, xsect_type=xs)
+                if not work.is_manifold_solid() or work.face_count() == 0:
+                    raise BuildError("Rundung/Fase nicht moeglich (Wert zu gross?)")
+                cur = work
+            return cur
+
         try:
-            edges = self.find_edges(o["edges"])
-            sm.fillet_edges(work, edges, radius=s, xsect_type=0 if chamfer else 1)
-        except Exception:
-            self.body = keep
-            raise
-        if not work.is_manifold_solid() or work.face_count() == 0:
-            self.body = keep
-            raise BuildError("Rundung/Fase nicht moeglich (Wert zu gross?)")
+            res = attempt([o["edges"]])
+        except Exception as first:  # noqa: BLE001
+            # mehrere Kanten in einem Schritt scheitern im Kern manchmal (z. B. an tangentialen Uebergaengen):
+            # dann Kante fuer Kante nacheinander verrunden
+            if len(o["edges"]) < 2:
+                self.body = keep
+                raise
+            try:
+                res = attempt([[e] for e in o["edges"]])
+            except Exception:  # noqa: BLE001
+                self.body = keep
+                raise BuildError("Rundung/Fase an dieser Kantenkombination nicht moeglich - Wert verkleinern oder die ganze Tangentenkette waehlen") from first
         self.tools.setdefault(o["fid"], [])
-        self.body = work
-        _ = before
+        self.body = res
 
     def op_pattern(self, o):
         sm = self.sm

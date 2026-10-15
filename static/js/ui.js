@@ -26,6 +26,7 @@ const ICONS = {
   chamfer: P('M4 20V10l6-6h10') + P('M4 4h6 M4 4v6', 'stroke-dasharray="2 2"'),
   pattern: '<rect x="3" y="3" width="6" height="6"/><rect x="15" y="3" width="6" height="6" stroke-dasharray="2 2"/><rect x="3" y="15" width="6" height="6" stroke-dasharray="2 2"/><rect x="15" y="15" width="6" height="6" stroke-dasharray="2 2"/>',
   mirror: P('M12 2v20', 'stroke-dasharray="3 2"') + P('M10 6L3 18h7z M14 6l7 12h-7z'),
+  dim: P('M3 17h18 M3 14v6 M21 14v6') + P('M6 17l-2.5-1.6v3.2z M18 17l2.5-1.6v3.2z', 'fill="currentColor"') + '<text x="7" y="11" font-size="8" fill="currentColor" stroke="none">mm</text>',
   shell: P('M4 8l8-4 8 4v9l-8 4-8-4z') + P('M7 9.5l5-2.5 5 2.5v6l-5 2.5-5-2.5z', 'stroke-dasharray="2 1.5"'),
   sketch: P('M4 20l4-1L19 8l-3-3L5 16z M14 7l3 3'),
   measure: P('M3 17L17 3l4 4L7 21z M7 13l2 2 M10 10l2 2 M13 7l2 2'),
@@ -142,6 +143,15 @@ export function contextMenu(x, y, items) {
 }
 
 // ------------------------------------------------------------ Feature-Dashboard (Creo-Stil)
+/** Einheit eines Dashboard-Felds: explizit (f.unit) oder aus der Bezeichnung abgeleitet - alle Laengen in mm */
+export function fieldUnit(f) {
+  if (f.unit !== undefined) return f.unit;
+  if (f.type !== 'expr') return '';
+  const l = String(f.label || '');
+  if (/Winkel|°/.test(l)) return '°';
+  if (/Anzahl|Maßstab|Ecken/.test(l)) return '';
+  return 'mm';
+}
 /**
  * fields: [{key, label, type: expr|number|select|check|button|ref|info|color|text, options:[[v,l]], value, onClick, show:(vals)=>bool, width}]
  * Liefert ein Objekt mit close(), values(), set(k,v), refresh(), error(msg)
@@ -169,7 +179,10 @@ export function dashboard({ title, iconName, fields, onChange, onOk, onCancel, t
           onkeydown: (e) => { if (e.key === 'Enter') { ch(e.target.value); api.ok(); } e.stopPropagation(); },
           onchange: (e) => ch(e.target.value) });
       }
-      row.append(f.type === 'check' || f.type === 'button' || f.type === 'info' ? el('div', { class: 'dash-f' }, ctl) : el('div', { class: 'dash-f' }, el('span', { class: 'lab' }, f.label), ctl));
+      const unit = fieldUnit(f);
+      const label = String(f.label || '').replace(/\s*\[(°|mm)\]/, '');
+      row.append(f.type === 'check' || f.type === 'button' || f.type === 'info' ? el('div', { class: 'dash-f' }, ctl)
+        : el('div', { class: 'dash-f' }, el('span', { class: 'lab' }, label), ctl, unit ? el('span', { class: 'unit' }, unit) : null));
     }
   };
   render();
@@ -180,6 +193,8 @@ export function dashboard({ title, iconName, fields, onChange, onOk, onCancel, t
   const api = {
     vals, render,
     set(k, v) { vals[k] = v; render(); },
+    /** Wert aendern wie durch Eingabe (loest Vorschau aus) */
+    change(k, v) { vals[k] = v; render(); onChange?.(vals, k); },
     error(msg) { errEl.textContent = msg || ''; errEl.style.display = msg ? '' : 'none'; },
     async ok() { try { const r = await onOk?.(vals); if (r !== false) close(); } catch (e) { api.error(e.message); } },
     cancel() { close(); onCancel?.(); },

@@ -269,7 +269,7 @@ function edgeOp(f, ctx) {
   const p = f.params; const s = ctx.X(p.size, f.type === 'round' ? 'Radius' : 'Abstand'); if (!(s > 0)) throw new Error('Wert muss > 0 sein');
   if (!p.edges?.length) throw new Error('Keine Kanten gewählt');
   const mid = (e) => e.mid || e.a.map((v, i) => (v + e.b[i]) / 2);
-  return { size: s, edges: p.edges.map(e => ({ mid: mid(e) })) };
+  return { size: s, edges: p.edges.map(e => ({ mid: mid(e), a: e.a, b: e.b, len: e.len })) };
 }
 
 /** Interner Netzkern (Rueckfallebene ohne usd-brep, z. B. macOS) */
