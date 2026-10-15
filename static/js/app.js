@@ -1,6 +1,6 @@
 // BrowserCAD - Hauptanwendung
-import * as THREE from 'three';
-import { TransformControls } from 'three/addons/controls/TransformControls.js';
+import * as THREE from '../vendor/three.module.js';
+import { TransformControls } from '../vendor/addons/controls/TransformControls.js';
 import { $, el, api, apiJson, readFileBytes, readFileText, writeFile, downloadBlob, clone, debounce, fmt, stem, baseName, evalParams, evalExpr, uid } from './util.js';
 import * as G from './geom.js';
 import { Viewer, VIEWS } from './viewer.js';
@@ -47,21 +47,48 @@ async function init() {
   App.measureG = new THREE.Group(); App.viewer.overlay.add(App.measureG);
   let last = performance.now();
   App.viewer.onFrame = (t) => { const dt = Math.min(0.05, (t - last) / 1000); last = t; App.sm?.frame(dt); };
+  buildIGT(); bindKeys(); bindNavTabs(); bindDesktop();
+  try { App.server = await api('/api/state'); } catch (e) { status('Server nicht erreichbar: ' + e.message, 'err'); return; }
+  App.desktop = App.server.mode === 'desktop';
+  document.body.classList.toggle('desktop', App.desktop);
+  if (!App.desktop) window.addEventListener('beforeunload', (e) => { if (App.docs.some(d => d.dirty)) { e.preventDefault(); e.returnValue = ''; } });
   App.sm = new SpaceMouse({
+    native: App.server.hid,
     onMotion: (tr, rot, dt, cfg) => App.viewer.spaceMouse(tr, rot, dt, cfg),
     onButton: (n, action) => smButton(action),
-    onStatus: (s) => { $('#sm-status').textContent = `SpaceMouse: ${s}`; $('#sm-status').classList.toggle('on', s.startsWith('verbunden')); },
+    onStatus: (s) => { const e = $('#sm-status'); if (!e) return; e.textContent = `SpaceMouse: ${s}`; e.classList.toggle('on', s.startsWith('verbunden')); },
   });
-  if (!App.sm.supported) $('#sm-status').textContent = 'SpaceMouse: Browser ohne WebHID';
-  buildIGT(); bindKeys(); bindNavTabs();
-  window.addEventListener('beforeunload', (e) => { if (App.docs.some(d => d.dirty)) { e.preventDefault(); e.returnValue = ''; } });
-  try { App.server = await api('/api/state'); } catch (e) { status('Server nicht erreichbar: ' + e.message, 'err'); return; }
+  if (!App.sm.supported) $('#sm-status').textContent = 'SpaceMouse: nicht verfügbar';
   $('#version').textContent = `v${App.server.version}`;
   document.title = `BrowserCAD ${App.server.version}`;
   renderRibbon(); renderDocTabs(); renderNav();
   await workdirDialog(true);
   newDoc('part', nextDefaultName('part'), true);
 }
+
+// ---------------------------------------------------------------- Desktop-Fenster
+/** Programmfenster (pywebview): natives API oder null im Browser */
+const nativeApi = () => (App.desktop && window.pywebview?.api) || null;
+async function waitNative(ms = 3000) {
+  if (!App.desktop) return null; const t0 = performance.now();
+  while (!window.pywebview?.api?.pick_folder && performance.now() - t0 < ms) await new Promise(r => setTimeout(r, 50));
+  return nativeApi();
+}
+function bindDesktop() {
+  // Browser-Eigenheiten im Programmfenster unterdruecken: Kontextmenue, Neuladen, Drucken, Suchen, Zoom
+  document.addEventListener('contextmenu', (e) => { if (!e.target.closest('input,textarea')) e.preventDefault(); });
+  window.addEventListener('keydown', (e) => {
+    const k = e.key.toLowerCase(); const mod = e.ctrlKey || e.metaKey;
+    if (e.key === 'F5' || (mod && ['r', 'p', 'f', 'u', '+', '-', '=', '0'].includes(k)) || (mod && e.shiftKey && k === 'i')) e.preventDefault();
+  }, true);
+  window.addEventListener('wheel', (e) => { if (e.ctrlKey && !e.target.closest('#viewport')) e.preventDefault(); }, { passive: false });
+}
+let lastDirty = null;
+function syncDirty() {
+  const dirty = App.docs.some(d => d.dirty);
+  if (dirty !== lastDirty) { lastDirty = dirty; apiJson('/api/dirty', { dirty }).catch(() => {}); }
+}
+App.requestExit = () => exitApp();
 
 function debounceFrame(fn) { let pending = null; return (e) => { const first = !pending; pending = e; if (first) requestAnimationFrame(() => { const x = pending; pending = null; fn(x); }); }; }
 
@@ -98,6 +125,8 @@ async function workdirDialog(initial = false) {
 }
 
 async function folderBrowser(start) {
+  const na = await waitNative();
+  if (na) { try { return await na.pick_folder(start || ''); } catch (e) { toast(e.message || String(e), 'err'); return null; } }
   let cur = start;
   const list = el('div', { class: 'flist' }); const pathEl = el('div', { class: 'path' });
   const load = async (p) => {
@@ -163,7 +192,12 @@ function restoreCam(s) { const c = App.viewer.camera; c.position.copy(s.p); c.qu
 
 function updateTitle() {
   const d = doc();
-  $('#doc-title').textContent = d ? `${d.data.name.toUpperCase()}${d.kind === 'part' ? ' (Part)' : ' (Baugruppe)'}${d.dirty ? ' *' : ''}` : '';
+  const t = d ? `${d.data.name.toUpperCase()}${d.kind === 'part' ? ' (Part)' : ' (Baugruppe)'}${d.dirty ? ' *' : ''}` : '';
+  $('#doc-title').textContent = t;
+  const full = `BrowserCAD ${App.server?.version || ''}${t ? ' – ' + t : ''}`;
+  document.title = full;
+  if (full !== App._winTitle) { App._winTitle = full; nativeApi()?.set_title(full); }
+  syncDirty();
 }
 
 /** Regenerieren und anzeigen */
@@ -256,7 +290,11 @@ async function fileChooser({ title, kinds, okLabel = 'Öffnen' }) {
     try { const r = await api('/api/upload', { method: 'POST', body: fd }); await refreshFiles(); draw(); toast(`${r.files.length} Datei(en) ins Arbeitsverzeichnis kopiert`, 'ok'); }
     catch (er) { toast(er.message, 'err'); }
   } });
-  return modal({ title, width: 720, body: el('div', {}, el('div', { class: 'row' }, search, el('button', { class: 'btn', onclick: () => up.click() }, icon('upload'), 'Vom Computer hinzufügen…'), up),
+  return modal({ title, width: 720, body: el('div', {}, el('div', { class: 'row' }, search, el('button', { class: 'btn', onclick: async () => {
+    const na = nativeApi(); if (!na) { up.click(); return; }
+    const paths = await na.pick_files(); if (!paths?.length) return;
+    try { const r = await apiJson('/api/import_paths', { paths }); await refreshFiles(); draw(); toast(`${r.files.length} Datei(en) ins Arbeitsverzeichnis kopiert`, 'ok'); } catch (er) { toast(er.message, 'err'); }
+  } }, icon('upload'), 'Vom Computer hinzufügen…'), up),
     list, el('div', { class: 'muted small' }, `Arbeitsverzeichnis: ${App.server.workdir}`)),
   buttons: [{ label: 'Abbrechen', value: null }, { label: okLabel, primary: true, value: () => chosen }] });
 }
@@ -340,9 +378,9 @@ async function exportDialog() {
   const d = doc(); if (!d) return;
   const fmtSel = el('select', {}, el('option', { value: 'step' }, 'STEP AP214 (.stp)'), el('option', { value: 'stlb' }, 'STL binär (.stl)'), el('option', { value: 'stla' }, 'STL ASCII (.stl)'), el('option', { value: 'usda' }, 'OpenUSD ASCII (.usda)'));
   const name = el('input', { value: d.data.name.toLowerCase() });
-  const dl = el('input', { type: 'checkbox', checked: true });
+  const dl = el('input', { type: 'checkbox', checked: !App.desktop });
   const r = await modal({ title: 'Exportieren', body: el('div', {}, el('label', { class: 'fld' }, 'Format', fmtSel), el('label', { class: 'fld' }, 'Dateiname (ohne Endung)', name),
-    el('label', { class: 'chk' }, dl, 'Zusätzlich im Browser herunterladen'),
+    el('label', { class: 'chk' }, dl, App.desktop ? 'Zusätzlich an einem anderen Ort speichern…' : 'Zusätzlich im Browser herunterladen'),
     el('p', { class: 'muted small' }, 'Die Datei wird ins Arbeitsverzeichnis geschrieben. STEP wird als Volumenkörper (B-Rep) mit ebenen Flächen ausgegeben; gekrümmte Flächen sind facettiert. Baugruppen werden als Mehrkörper-Datei exportiert.')),
   buttons: [{ label: 'Abbrechen', value: null }, { label: 'Exportieren', primary: true, value: () => ({ f: fmtSel.value, n: name.value.trim(), dl: dl.checked }) }] });
   if (!r) return;
@@ -355,7 +393,7 @@ async function exportDialog() {
     else { data = writeSTL(bodies.map(b => { const g = G.prepGeom(b.geom); if (b.matrix) g.applyMatrix4(b.matrix); return g; }), d.data.name, r.f === 'stlb'); ext = 'stl'; }
     const file = `${r.n}.${ext}`;
     await writeFile(file, data, false);
-    if (r.dl) downloadBlob(data, file, type);
+    if (r.dl) { const na = nativeApi(); if (na) { const p = await na.save_copy(file); if (p) toast(`Kopie gespeichert: ${p}`, 'ok'); } else downloadBlob(data, file, type); }
     await refreshFiles();
     status(`Exportiert: ${file}`, 'ok', 5000);
   });
@@ -1072,35 +1110,39 @@ async function optionsDialog() {
   const st = await api('/api/state');
   const creo = el('input', { class: 'w100', value: st.converters.creo || '', placeholder: '"C:\\Programme\\CAD Exchanger\\bin\\ExchangerConv.exe" -i {in} -e {out}' });
   const sw = el('input', { class: 'w100', value: st.converters.solidworks || '', placeholder: '"…\\ExchangerConv.exe" -i {in} -e {out}' });
-  const appw = el('input', { type: 'checkbox', checked: st.app_window });
+  const appw = el('input', { type: 'checkbox', checked: st.ui_mode === 'browser' });
   const d = doc(); const seg = el('input', { type: 'number', min: 16, max: 256, value: isPart(d) ? d.data.settings?.seg || 64 : 64, style: 'width:80px' });
   const r = await modal({ title: 'Optionen', width: 640, body: el('div', {},
     el('h4', {}, 'Konverter für native CAD-Formate'),
     el('p', { class: 'muted small' }, 'Befehl, der eine Creo- bzw. SolidWorks-Datei nach STEP wandelt. Platzhalter {in} = Quelldatei, {out} = Ziel-STEP. Ohne Eintrag bitte im Ursprungsprogramm als STEP exportieren.'),
     el('label', { class: 'fld' }, 'Creo (.prt/.asm)', creo), el('label', { class: 'fld' }, 'SolidWorks (.sldprt/.sldasm)', sw),
-    el('h4', {}, 'Programm'), el('label', { class: 'chk' }, appw, 'Beim Start als App-Fenster in Edge/Chrome öffnen (empfohlen für SpaceMouse)'),
+    el('h4', {}, 'Programm'), el('label', { class: 'chk' }, appw, 'Oberfläche im Standardbrowser statt im eigenen Programmfenster öffnen (ab dem nächsten Start)'),
     isPart(d) ? el('label', { class: 'fld' }, 'Facettierung des aktiven Parts (Segmente pro Vollkreis)', seg) : null),
   buttons: [{ label: 'Abbrechen', value: null }, { label: 'Speichern', primary: true, value: true }] });
   if (!r) return;
-  await apiJson('/api/config', { converters: { creo: creo.value, solidworks: sw.value }, app_window: appw.checked });
+  await apiJson('/api/config', { converters: { creo: creo.value, solidworks: sw.value }, ui_mode: appw.checked ? 'browser' : 'desktop' });
   if (isPart(d) && +seg.value !== (d.data.settings?.seg || 64)) await commit((data) => { data.settings = { ...(data.settings || {}), seg: Math.max(16, Math.min(256, +seg.value || 64)) }; });
   toast('Optionen gespeichert', 'ok');
 }
 
 async function spaceMouseDialog() {
   const sm = App.sm; const c = sm.cfg;
-  const stat = el('div', { class: 'muted' }, sm.supported ? (sm.device ? `Verbunden: ${sm.device.productName}` : 'Nicht verbunden') : 'Dieser Browser unterstützt kein WebHID. Bitte Chrome oder Microsoft Edge verwenden.');
+  const stat = el('div', { class: 'muted' }, sm.device ? `Verbunden: ${sm.device.productName}${sm.native ? ' (USB, direkt vom Programm gelesen)' : ' (WebHID)'}`
+    : sm.native ? 'Kein Gerät gefunden. SpaceMouse (Kabel oder Funkempfänger) anstecken – sie wird automatisch erkannt.'
+      : sm.supported ? 'Nicht verbunden' : 'SpaceMouse nicht verfügbar (Programm ohne USB-HID-Unterstützung und Browser ohne WebHID).');
   const rng = (k, min, max, step) => el('input', { type: 'range', min, max, step, value: c[k], oninput: (e) => { c[k] = +e.target.value; sm.saveCfg(); } });
   const chk = (obj, k, label) => el('label', { class: 'chk' }, el('input', { type: 'checkbox', checked: obj[k], onchange: (e) => { obj[k] = e.target.checked; sm.saveCfg(); } }), label);
   const btnSel = (n) => el('select', { onchange: (e) => { c.buttons[n] = e.target.value; sm.saveCfg(); } }, [['fit', 'Einpassen'], ['standard', 'Standardausrichtung'], ['FRONT', 'FRONT'], ['TOP', 'TOP'], ['RIGHT', 'RIGHT'], ['', '—']].map(([v, l]) => el('option', { value: v, selected: c.buttons[n] === v }, l)));
   await modal({ title: '3Dconnexion SpaceMouse', width: 560, body: el('div', {}, stat,
-    el('button', { class: 'btn primary', disabled: !sm.supported, onclick: async () => { try { await sm.request(); stat.textContent = `Verbunden: ${sm.device.productName}`; } catch (e) { stat.textContent = e.message; } } }, icon('spacemouse'), 'Gerät verbinden…'),
+    sm.native ? null : el('button', { class: 'btn primary', disabled: !sm.supported, onclick: async () => { try { await sm.request(); stat.textContent = `Verbunden: ${sm.device.productName}`; } catch (e) { stat.textContent = e.message; } } }, icon('spacemouse'), 'Gerät verbinden…'),
     el('label', { class: 'fld' }, 'Empfindlichkeit', rng('sensitivity', 0.1, 3, 0.05)), el('label', { class: 'fld' }, 'Totzone', rng('deadzone', 0, 0.3, 0.01)),
     el('div', { class: 'row wrap' }, chk(c, 'pan', 'Verschieben'), chk(c, 'zoom', 'Zoomen'), chk(c, 'rotate', 'Drehen'), chk(c, 'dominant', 'Nur dominante Achse')),
     el('div', { class: 'muted small' }, 'Achsen umkehren:'),
     el('div', { class: 'row wrap' }, ...['tx', 'ty', 'tz', 'rx', 'ry', 'rz'].map(k => chk(c.invert, k, k.toUpperCase()))),
     el('div', { class: 'row' }, el('label', {}, 'Taste 1 ', btnSel(1)), el('label', {}, 'Taste 2 ', btnSel(2))),
-    el('p', { class: 'muted small' }, 'Funktioniert in Chrome/Edge über WebHID. Falls das Gerät nicht reagiert, den 3Dconnexion-Treiber (3DxWare) kurz beenden – manche Treiberversionen belegen das Gerät exklusiv.')),
+    el('p', { class: 'muted small' }, sm.native
+      ? 'Das Programm liest die SpaceMouse direkt per USB. Reagiert sie nicht, den 3Dconnexion-Treiber (3DxWare / 3Dconnexion Home) beenden – er kann das Gerät exklusiv belegen. Unter macOS ggf. in Systemeinstellungen › Datenschutz › Eingabeüberwachung BrowserCAD erlauben.'
+      : 'Im Browser-Modus über WebHID (Chrome/Edge). Falls das Gerät nicht reagiert, den 3Dconnexion-Treiber kurz beenden.')),
   buttons: [{ label: 'Schließen', value: true, primary: true }] });
 }
 function smButton(action) {
@@ -1125,7 +1167,9 @@ function helpDialog() {
 async function exitApp() {
   if (App.docs.some(d => d.dirty) && !(await confirmDialog('Beenden', 'Es gibt ungespeicherte Änderungen. Trotzdem beenden?', 'Beenden', true))) return;
   App.docs.forEach(d => { d.dirty = false; });
+  syncDirty(); App.sm?.es?.close();
   try { await api('/api/shutdown', { method: 'POST' }); } catch { /* Server weg */ }
+  if (App.desktop) return; // Programmfenster wird vom Programm geschlossen
   document.body.replaceChildren(el('div', { class: 'bye' }, el('h2', {}, 'BrowserCAD wurde beendet'), el('p', {}, 'Dieses Fenster kann geschlossen werden.')));
   setTimeout(() => window.close(), 400);
 }
@@ -1143,7 +1187,11 @@ async function modelColor() {
   if (isPart(d)) await commit((data) => { data.color = r; });
   else { const c = App.sel[0]?.compId; if (!c) { toast('Komponente im Grafikbereich wählen', 'warn'); return; } await commit((data) => { data.components.find(x => x.id === c).color = r; }); }
 }
-function screenshot() { downloadBlob(dataURLtoBlob(App.viewer.screenshot()), `${doc()?.data.name || 'bild'}.png`); }
+async function screenshot() {
+  const blob = dataURLtoBlob(App.viewer.screenshot()); const name = `${(doc()?.data.name || 'bild').toLowerCase()}.png`;
+  try { await writeFile(name, blob, false); await refreshFiles(); status(`Bild gespeichert: ${name} (Arbeitsverzeichnis)`, 'ok', 5000); } catch (e) { toast(e.message, 'err'); }
+  if (!App.desktop) downloadBlob(blob, name);
+}
 function dataURLtoBlob(u) { const [h, b] = u.split(','); const bin = atob(b); const a = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i); return new Blob([a], { type: h.match(/:(.*?);/)[1] }); }
 
 // =====================================================================================
@@ -1391,16 +1439,21 @@ function folderTree() {
       { label: 'Öffnen', icon: 'open', action: () => openFile(f.path) },
       isAsm() && ['part', 'assembly'].includes(f.kind) ? { label: 'In aktive Baugruppe einbauen', icon: 'assemble', action: async () => { await commit((data) => { data.components.push(newComponent(f.path, stem(f.path).toUpperCase())); }); } } : null,
       isPart() && ['step', 'iges', 'stl'].includes(f.kind) ? { label: 'In aktives Part importieren', icon: 'import', action: async () => { await busy('Importiere…', async () => { const m = await readForeign(f.path, f.kind); await commit((data) => insertFeature(data, importFeature(data, `Import ${f.name}`, m.length > 1 ? G.concatGeoms(m.map(x => x.geom)) : m[0].geom, f.path))); }); } } : null,
-      { label: 'Herunterladen', icon: 'export', action: () => { window.open(`/api/file?path=${encodeURIComponent(f.path)}&download=1`); } },
+      App.desktop
+        ? { label: 'Kopie speichern unter…', icon: 'export', action: async () => { const p = await nativeApi()?.save_copy(f.path); if (p) toast(`Kopie gespeichert: ${p}`, 'ok'); } }
+        : { label: 'Herunterladen', icon: 'export', action: () => { window.open(`/api/file?path=${encodeURIComponent(f.path)}&download=1`); } },
+      { label: App.server?.platform === 'Darwin' ? 'Im Finder zeigen' : 'Im Explorer zeigen', icon: 'folder', action: () => apiJson('/api/reveal', { path: f.path }).catch(e => toast(e.message, 'err')) },
     ]); } },
   icon(fileIcon(f.kind)), el('span', { class: 'tn' }, f.path), el('span', { class: 'tc' }, KIND_LABEL[f.kind])));
   return el('div', { class: 'tree' },
-    el('div', { class: 'row pad' }, el('button', { class: 'btn sm', onclick: () => refreshFiles() }, icon('refresh'), 'Aktualisieren'), el('button', { class: 'btn sm', onclick: () => workdirDialog(false) }, icon('workdir'), 'Wechseln')),
+    el('div', { class: 'row pad' }, el('button', { class: 'btn sm', onclick: () => refreshFiles() }, icon('refresh'), 'Aktualisieren'), el('button', { class: 'btn sm', onclick: () => workdirDialog(false) }, icon('workdir'), 'Wechseln'),
+      el('button', { class: 'btn sm', title: 'Arbeitsverzeichnis im Explorer/Finder öffnen', onclick: () => apiJson('/api/reveal', {}).catch(e => toast(e.message, 'err')) }, icon('folder'), 'Öffnen')),
     el('div', { class: 'muted small pad path' }, App.server?.workdir || ''),
     rows.length ? rows : el('div', { class: 'muted pad small' }, 'Keine CAD-Dateien im Arbeitsverzeichnis.'));
 }
 
 function renderDocTabs() {
+  syncDirty();
   $('#doctabs').replaceChildren(...App.docs.map(d => el('div', { class: `doctab ${d === App.active ? 'on' : ''}`, onclick: () => { if (d !== App.active) activate(d); } },
     icon(d.kind === 'part' ? 'part' : 'assembly'), el('span', {}, `${d.data.name}${d.dirty ? ' *' : ''}`),
     el('button', { class: 'x', title: 'Fenster schließen', onclick: (e) => { e.stopPropagation(); closeDoc(d); } }, '×'))));

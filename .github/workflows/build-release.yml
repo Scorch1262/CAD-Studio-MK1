@@ -33,10 +33,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller
 
-      - name: Kurztest (Server startet, Oberflaeche wird ausgeliefert)
+      - name: Pruefen, dass Fenster- und USB-Bibliotheken vorhanden sind
+        run: python -c "import webview, hid; print('pywebview + hidapi ok')"
+
+      - name: Kurztest (interner Server startet, Oberflaeche wird ausgeliefert)
         shell: bash
         env:
-          BROWSERCAD_NO_BROWSER: '1'
+          BROWSERCAD_MODE: server
           BROWSERCAD_PORT: '8877'
         run: |
           python browsercad.py &
@@ -49,7 +52,7 @@ jobs:
           curl -sf -o /dev/null http://127.0.0.1:8877/
           curl -sf -o /dev/null http://127.0.0.1:8877/js/app.js
           curl -sf -o /dev/null http://127.0.0.1:8877/vendor/occt/occt-import-js.wasm
-          kill $PID || true
+          curl -sf -X POST http://127.0.0.1:8877/api/shutdown || kill $PID || true
 
       - name: PyInstaller
         run: pyinstaller --noconfirm --clean BrowserCAD.spec
@@ -106,10 +109,10 @@ jobs:
           {
             echo "BrowserCAD ${{ steps.ver.outputs.version }} (Build ${{ github.run_number }})"
             echo
-            echo "- Windows: BrowserCAD-*-windows-x64.exe starten"
-            echo "- macOS: ZIP entpacken, BrowserCAD.app per Rechtsklick > Oeffnen starten (nicht signiert)"
+            echo "- Windows 10/11: BrowserCAD-*-windows-x64.exe starten (benoetigt die WebView2-Laufzeit, auf Windows 11 vorinstalliert)"
+            echo "- macOS 12 oder neuer: ZIP entpacken, BrowserCAD.app beim ersten Mal per Rechtsklick > Oeffnen starten (nicht notarisiert)"
             echo
-            echo "Die Oberflaeche oeffnet sich im Browser (Edge/Chrome empfohlen, fuer die SpaceMouse erforderlich)."
+            echo "BrowserCAD laeuft als eigenes Programmfenster, kein Browser noetig. Die SpaceMouse wird direkt per USB erkannt."
             echo
             awk '/^## /{n++} n==1' CHANGELOG.md
           } > release_notes.md

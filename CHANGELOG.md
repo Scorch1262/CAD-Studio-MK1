@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.1.0] - 2026-10-15
+### Geändert
+- BrowserCAD ist jetzt ein eigenständiges Desktop-Programm mit eigenem Fenster (Windows: WebView2, macOS: WKWebView) – es öffnet sich kein Browser mehr
+- exe ohne Konsolenfenster; Protokoll in ~/.browsercad/browsercad.log
+- SpaceMouse wird direkt per USB-HID gelesen (hidapi), automatische Erkennung beim Anstecken; WebHID nur noch im Browser-Modus
+- Import-Map entfernt, alle Module mit relativen Pfaden (läuft auch in älteren macOS-WebViews)
+### Neu
+- Nativer Ordnerdialog für das Arbeitsverzeichnis, nativer Dateidialog zum Hinzufügen von Dateien
+- Rückfrage beim Schließen des Fensters mit ungespeicherten Änderungen
+- „Kopie speichern unter…“ und „Im Explorer/Finder zeigen“ im Ordner-Browser, Arbeitsverzeichnis öffnen
+- Fenstertitel zeigt das aktive Modell und den Speicherstatus
+- Zweiter Programmstart holt das laufende Fenster nach vorn
+- Startoptionen --browser und --server, Browser-Modus wählbar unter Werkzeuge › Optionen
+- Bild (PNG) wird im Arbeitsverzeichnis gespeichert
+
 ## [1.0.0] - 2026-10-14
 ### Neu
 - Browserbasiertes CAD mit Creo-orientierter Oberfläche (Menüband, Modellbaum, Feature-Dashboard, Layerbaum, Ordner-Browser) im dunklen Dashboard-Thema

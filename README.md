@@ -1,10 +1,10 @@
-# BrowserCAD 1.0.0
+# BrowserCAD 1.1.0
 
-Browserbasiertes 3D-CAD im dunklen Dashboard-Stil, dessen Bedienung sich an **PTC Creo Parametric** orientiert:
-Menüband mit Registerkarten, Modellbaum mit Einfügemarke, Feature-Dashboard mit ✔/✖, Layerbaum,
-Bezugsanzeige-Filter, Creo-Maussteuerung und 3Dconnexion-SpaceMouse.
+Eigenständiges 3D-CAD-Programm für Windows und macOS im dunklen Dashboard-Stil, dessen Bedienung sich an
+**PTC Creo Parametric** orientiert: Menüband mit Registerkarten, Modellbaum mit Einfügemarke, Feature-Dashboard
+mit ✔/✖, Layerbaum, Bezugsanzeige-Filter, Creo-Maussteuerung und 3Dconnexion-SpaceMouse.
 
-Das Programm ist ein kleiner lokaler Webserver (Python/Flask + Waitress), der die Oberfläche im Browser öffnet.
+BrowserCAD läuft in **einem eigenen Programmfenster** – es wird kein Browser geöffnet und keiner benötigt.
 GitHub Actions baut daraus eine **Windows-exe** und eine **macOS-App** und legt automatisch ein **Release** an.
 
 ---
@@ -13,15 +13,21 @@ GitHub Actions baut daraus eine **Windows-exe** und eine **macOS-App** und legt 
 
 | System | Start |
 |---|---|
-| Windows | `BrowserCAD-1.0.0-windows-x64.exe` doppelklicken. Das Konsolenfenster ist der Server – schließen beendet das Programm. |
-| macOS | ZIP entpacken, `BrowserCAD.app` beim ersten Mal per **Rechtsklick › Öffnen** starten (App ist nicht notarisiert). Beenden über **Datei › Beenden**. |
+| Windows 10/11 | `BrowserCAD-1.1.0-windows-x64.exe` doppelklicken. Benötigt die Microsoft-WebView2-Laufzeit (auf Windows 11 und aktuellen Windows-10-Systemen vorhanden; sonst kostenlos bei Microsoft). |
+| macOS 12+ | ZIP entpacken, `BrowserCAD.app` beim ersten Mal per **Rechtsklick › Öffnen** starten (App ist nicht notarisiert). |
 | Quellcode | `pip install -r requirements.txt` und `python browsercad.py` |
 
-Beim Start öffnet sich die Oberfläche (bevorzugt als App-Fenster von Edge/Chrome). Als Erstes wird das
-**Arbeitsverzeichnis** festgelegt – dort liegen alle Parts, Baugruppen, Importe und Exporte.
+Als Erstes wird das **Arbeitsverzeichnis** festgelegt (mit nativem Ordnerdialog) – dort liegen alle Parts,
+Baugruppen, Importe und Exporte. Beim Schließen des Fensters mit ungespeicherten Änderungen fragt BrowserCAD nach.
+Ein zweiter Start holt das bereits laufende Fenster nach vorn.
 
-Der Server lauscht nur auf `127.0.0.1` (Standardport 8765, bei Belegung der nächste freie).
-Einstellungen: `~/.browsercad/config.json`.
+### Technik
+- Fenster: [pywebview](https://pywebview.flowrl.com/) – Windows: Edge WebView2, macOS: WKWebView
+- Intern arbeitet ein Server auf `127.0.0.1` (Standardport 8765), den nur das Programmfenster nutzt
+- Einstellungen: `~/.browsercad/config.json`, Protokoll: `~/.browsercad/browsercad.log`
+- Startoptionen: `--browser` (Oberfläche ersatzweise im Standardbrowser), `--server` (nur interner Server, für Tests).
+  Unter *Werkzeuge › Optionen* lässt sich der Browser-Modus dauerhaft einstellen. Ist kein WebView verfügbar,
+  weicht das Programm automatisch auf den Browser aus.
 
 ---
 
@@ -72,11 +78,14 @@ Konverter kann sie kein freies Programm lesen. BrowserCAD bietet deshalb zwei We
    BrowserCAD ruft ihn beim Öffnen/Importieren automatisch auf und importiert das STEP-Ergebnis (Ablage in `_konvertiert/`).
 
 ### 3Dconnexion SpaceMouse
-Über **WebHID** in Chrome/Edge (die Oberfläche läuft auf `localhost`, das reicht als sicherer Kontext).
-**Werkzeuge › SpaceMouse › Gerät verbinden** einmalig bestätigen, danach verbindet sich das Gerät automatisch.
-Einstellbar: Empfindlichkeit, Totzone, Achsen umkehren, nur dominante Achse, Funktionen der Tasten 1/2.
-Reagiert das Gerät nicht, den 3Dconnexion-Treiber (3DxWare) kurz beenden – manche Versionen belegen das Gerät exklusiv.
-Safari und Firefox unterstützen WebHID nicht.
+Das Programm liest die SpaceMouse **direkt per USB-HID** (hidapi) – anstecken genügt, sie wird automatisch
+erkannt (Kabel und Funkempfänger, alte Logitech-/3Dconnexion- und neue Geräte). Der Status steht unten in der
+Statusleiste. Einstellbar unter *Werkzeuge › SpaceMouse*: Empfindlichkeit, Totzone, Achsen umkehren, nur dominante
+Achse, Funktionen der Tasten 1/2.
+
+Reagiert das Gerät nicht: den 3Dconnexion-Treiber (3DxWare / 3Dconnexion Home) beenden, er kann das Gerät exklusiv
+belegen. Unter macOS ggf. in *Systemeinstellungen › Datenschutz & Sicherheit › Eingabeüberwachung* BrowserCAD
+erlauben. Im Browser-Modus wird ersatzweise WebHID (Chrome/Edge) verwendet.
 
 ---
 
@@ -102,7 +111,7 @@ Ablauf wie in Creo: Ebene oder Fläche wählen → **Extrudieren** → Skizze ze
 in OpenUSD. Sie wird mit NVIDIAs eigener Build-Kette (Packman, Visual Studio 2019-Toolset, nicht öffentliches
 macOS-Premake-Paket) gebaut und lässt sich daher nicht in eine per GitHub Actions erzeugte Einzeldatei-exe/-App einbetten.
 BrowserCAD lehnt sich konzeptionell daran an (B-Rep-Export, OpenUSD-Export mit Millimeter-Einheit, offene Datenformate)
-und verwendet einen eigenen, im Browser laufenden Kern:
+und verwendet einen eigenen, im Programmfenster (JavaScript/WebGL) laufenden Kern:
 
 - **Modellkern:** facettierter B-Rep-Ansatz (three.js + three-bvh-csg für Boolesche Operationen), eigene Profil-,
   Extrusions-, Rotations-, Rundungs-/Fasen- und Musterlogik, Netzbereinigung (Verschweißen, T-Stöße)
@@ -145,7 +154,7 @@ Beim Speichern bleibt die Vorversion als `*.bak` erhalten.
 
 ## Build
 
-Der Workflow `.github/workflows/build-release.yml` läuft bei jedem Push auf `main`/`master`, bei Tags `v*`
+Abhängigkeiten: Flask, Waitress, pywebview, hidapi (`requirements.txt`). Der Workflow `.github/workflows/build-release.yml` läuft bei jedem Push auf `main`/`master`, bei Tags `v*`
 und manuell. Er testet kurz den Server, baut mit PyInstaller (`BrowserCAD.spec`) und erzeugt ein Release
 `v<VERSION>-build<Nummer>` (bzw. den Tag-Namen) mit beiden Paketen. Die Version steht in `VERSION`.
 

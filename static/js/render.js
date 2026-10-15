@@ -1,6 +1,6 @@
 // Szenenaufbau fuer Parts und Bezugselemente
-import * as THREE from 'three';
-import { toCreasedNormals } from 'three/addons/utils/BufferGeometryUtils.js';
+import * as THREE from '../vendor/three.module.js';
+import { toCreasedNormals } from '../vendor/addons/utils/BufferGeometryUtils.js';
 import { hiddenByLayer } from './part.js';
 
 export const DATUM_COLOR = 0xd9a05b;

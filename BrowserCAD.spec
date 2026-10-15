@@ -1,21 +1,35 @@
 # -*- mode: python ; coding: utf-8 -*-
-# PyInstaller-Spezifikation fuer BrowserCAD
-#   Windows: dist/BrowserCAD.exe (eine Datei, mit Konsolenfenster = Serverlog, schliessen beendet)
-#   macOS:   dist/BrowserCAD.app (ohne Konsole, Beenden ueber Datei > Beenden in der Oberflaeche)
+# PyInstaller-Spezifikation fuer BrowserCAD (eigenes Programmfenster, keine Konsole)
+#   Windows: dist/BrowserCAD.exe   (eine Datei)
+#   macOS:   dist/BrowserCAD.app
 import sys
 from pathlib import Path
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
 
 VERSION = Path('VERSION').read_text(encoding='utf-8').strip()
+
+datas = [('static', 'static'), ('VERSION', '.')]
+datas += collect_data_files('webview')          # JS-Bruecke, WebView2Loader usw.
+binaries = collect_dynamic_libs('webview') + collect_dynamic_libs('hid')
+
+hidden = ['waitress', 'hid'] + collect_submodules('webview')
+if sys.platform == 'win32':
+    hidden += ['clr', 'clr_loader']               # pythonnet fuer WebView2
+elif sys.platform == 'darwin':
+    hidden += ['objc', 'Foundation', 'AppKit', 'WebKit', 'Quartz']
+
+# Linux-/Qt-Backends von pywebview nicht mitpacken
+excludes = ['tkinter', 'numpy', 'matplotlib', 'PIL', 'PyQt5', 'PyQt6', 'PySide2', 'PySide6', 'qtpy', 'gi']
 
 a = Analysis(
     ['browsercad.py'],
     pathex=[],
-    binaries=[],
-    datas=[('static', 'static'), ('VERSION', '.')],
-    hiddenimports=['waitress'],
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=hidden,
     hookspath=[],
     runtime_hooks=[],
-    excludes=['tkinter', 'numpy', 'matplotlib', 'PIL'],
+    excludes=excludes,
     noarchive=False,
 )
 pyz = PYZ(a.pure)
@@ -41,7 +55,9 @@ if sys.platform == 'darwin':
             'CFBundleShortVersionString': VERSION,
             'CFBundleVersion': VERSION,
             'NSHighResolutionCapable': True,
-            'LSMinimumSystemVersion': '11.0',
+            'LSMinimumSystemVersion': '12.0',
+            # lokaler Server auf 127.0.0.1 im eigenen Fenster
+            'NSAppTransportSecurity': {'NSAllowsLocalNetworking': True},
         },
     )
 else:
@@ -49,6 +65,6 @@ else:
         pyz, a.scripts, a.binaries, a.datas, [],
         name='BrowserCAD',
         debug=False, strip=False, upx=False,
-        console=True,
+        console=False,
         runtime_tmpdir=None,
     )

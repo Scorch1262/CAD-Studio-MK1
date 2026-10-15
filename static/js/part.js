@@ -1,5 +1,5 @@
 // Part-Dokument (Feature-Historie wie in Creo) und Regenerierung
-import * as THREE from 'three';
+import * as THREE from '../vendor/three.module.js';
 import * as G from './geom.js';
 import { evalExpr, evalParams, uid, b64ToF32, f32ToB64 } from './util.js';
 

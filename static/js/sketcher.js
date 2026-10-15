@@ -1,5 +1,5 @@
 // 2D-Skizzierer auf einer Ebene (an Creo "Skizze" angelehnt)
-import * as THREE from 'three';
+import * as THREE from '../vendor/three.module.js';
 import * as G from './geom.js';
 import { el, fmt, uid, evalExpr } from './util.js';
 

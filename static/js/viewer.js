@@ -1,5 +1,5 @@
 // 3D-Ansicht: orthografische Kamera, Creo-Maussteuerung, Ansichten, Beschriftungen, Picken
-import * as THREE from 'three';
+import * as THREE from '../vendor/three.module.js';
 
 export const VIEWS = {
   standard: { dir: [1, 0.75, 1.15], up: [0, 1, 0], label: 'Standardausrichtung' },

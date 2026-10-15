@@ -1,4 +1,4 @@
-import { Box3, Matrix4, BufferAttribute, Vector3, Vector2, Plane, Line3, Triangle, REVISION, BackSide, DoubleSide, Ray, FrontSide, BufferGeometry, Sphere, Mesh, Object3D, Group, LineBasicMaterial, MeshBasicMaterial, Line, LineSegments, LineLoop, Points, BatchedMesh, RGBAFormat, RGFormat, RedFormat, RGBAIntegerFormat, RGIntegerFormat, RedIntegerFormat, DataTexture, NearestFilter, IntType, UnsignedIntType, FloatType, UnsignedByteType, UnsignedShortType, ByteType, ShortType, Vector4, Matrix3 } from 'three';
+import { Box3, Matrix4, BufferAttribute, Vector3, Vector2, Plane, Line3, Triangle, REVISION, BackSide, DoubleSide, Ray, FrontSide, BufferGeometry, Sphere, Mesh, Object3D, Group, LineBasicMaterial, MeshBasicMaterial, Line, LineSegments, LineLoop, Points, BatchedMesh, RGBAFormat, RGFormat, RedFormat, RGBAIntegerFormat, RGIntegerFormat, RedIntegerFormat, DataTexture, NearestFilter, IntType, UnsignedIntType, FloatType, UnsignedByteType, UnsignedShortType, ByteType, ShortType, Vector4, Matrix3 } from './three.module.js';
 
 // Split strategy constants
 
@@ -1654,7 +1654,7 @@ const BVHTraversalHelper = new ( class {
 
 } )();
 
-/** @import { Matrix4 } from 'three' */
+/** @import { Matrix4 } from './three.module.js' */
 
 const _tempBox = /* @__PURE__ */ new Box3();
 const _tempBuffer = /* @__PURE__ */ new Float32Array( 6 );
@@ -2281,7 +2281,7 @@ function getRootPrimitiveRanges( geo, range, stride ) {
 
 }
 
-/** @import { BufferGeometry } from 'three' */
+/** @import { BufferGeometry } from './three.module.js' */
 
 // construct a new buffer that points to the set of triangles represented by the given ranges
 function generateIndirectBuffer( ranges, useSharedArrayBuffer ) {
@@ -2796,7 +2796,7 @@ const sphereIntersectTriangle = ( function () {
 
 } )();
 
-/** @import { Sphere } from 'three' */
+/** @import { Sphere } from './three.module.js' */
 
 const componentKeys = [ 'x', 'y', 'z' ];
 const ZERO_EPSILON = 1e-15;
@@ -3662,7 +3662,7 @@ ExtendedTriangle.prototype.distanceToTriangle = ( function () {
 
 } )();
 
-/** @import { Box3, Triangle } from 'three' */
+/** @import { Box3, Triangle } from './three.module.js' */
 
 /**
  * An oriented version of three.js' Box3 class. A variety of derivative values are cached on the
@@ -4466,7 +4466,7 @@ function intersectTri( geometry, materialOrSide, ray, tri, intersections, near, 
 
 }
 
-/** @import { BufferGeometry } from 'three' */
+/** @import { BufferGeometry } from './three.module.js' */
 
 // sets the vertices of triangle `tri` with the 3 vertices after i
 function setTriangle( tri, i, index, pos ) {
@@ -6303,7 +6303,7 @@ function convertRaycastIntersect( hit, object, raycaster ) {
 
 }
 
-/** @import { BufferGeometry, Sphere, Box3, Intersection, Material, Object3D, Raycaster } from 'three' */
+/** @import { BufferGeometry, Sphere, Box3, Intersection, Material, Object3D, Raycaster } from './three.module.js' */
 /** @import { ExtendedTriangle } from '../math/ExtendedTriangle.js' */
 /** @import { IntersectsBoundsCallback, IntersectsRangeCallback, BoundsTraverseOrderCallback, IntersectsRangesCallback } from './BVH.js' */
 
@@ -7167,7 +7167,7 @@ class MeshBVH extends GeometryBVH {
 
 }
 
-/** @import { BufferGeometry } from 'three' */
+/** @import { BufferGeometry } from './three.module.js' */
 /** @import { IntersectsBoundsCallback, IntersectsRangeCallback, BoundsTraverseOrderCallback } from './BVH.js' */
 
 const _inverseMatrix$3 = /* @__PURE__ */ new Matrix4();
@@ -7688,7 +7688,7 @@ function iterateOverPoints(
 
 }
 
-/** @import { Object3D } from 'three' */
+/** @import { Object3D } from './three.module.js' */
 /** @import { IntersectsBoundsCallback, IntersectsRangeCallback, BoundsTraverseOrderCallback } from './BVH.js' */
 
 const _geometry = /* @__PURE__ */ new BufferGeometry();
@@ -8351,7 +8351,7 @@ function shrinkToSphere( box, sphere ) {
 
 }
 
-/** @import { SkinnedMesh } from 'three' */
+/** @import { SkinnedMesh } from './three.module.js' */
 /** @import { IntersectsBoundsCallback, IntersectsRangeCallback, BoundsTraverseOrderCallback } from './BVH.js' */
 
 const _v0 = /* @__PURE__ */ new Vector3();
@@ -8759,7 +8759,7 @@ function iterateOverTriangles(
 
 }
 
-/** @import { Color } from 'three' */
+/** @import { Color } from './three.module.js' */
 /** @import { GeometryBVH } from '../core/GeometryBVH.js' */
 
 const boundingBox = /* @__PURE__ */ new Box3();
@@ -9607,7 +9607,7 @@ function getJSONStructure( bvh ) {
 
 }
 
-/** @import { Raycaster, Intersection } from 'three' */
+/** @import { Raycaster, Intersection } from './three.module.js' */
 /** @import { GeometryBVH } from '../core/GeometryBVH.js' */
 
 const IS_REVISION_166 = parseInt( REVISION ) >= 166;
@@ -9905,7 +9905,7 @@ function disposeBatchedBoundsTree( index = - 1 ) {
 
 }
 
-/** @import { BufferAttribute } from 'three' */
+/** @import { BufferAttribute } from './three.module.js' */
 
 function countToStringFormat( count ) {
 
@@ -10429,7 +10429,7 @@ function bvhToTextures( bvh, boundsTexture, contentsTexture ) {
 
 }
 
-/** @import { Mesh, Material, Object3D } from 'three' */
+/** @import { Mesh, Material, Object3D } from './three.module.js' */
 
 const _positionVector = /*@__PURE__*/ new Vector3();
 const _normalVector = /*@__PURE__*/ new Vector3();

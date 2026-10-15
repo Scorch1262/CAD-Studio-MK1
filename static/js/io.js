@@ -1,5 +1,5 @@
 // Import/Export: STL, STEP (Lesen ueber OpenCascade/WASM, Schreiben als B-Rep mit ebenen Flaechen), USD
-import * as THREE from 'three';
+import * as THREE from '../vendor/three.module.js';
 import { prepGeom, concatGeoms, cleanMesh, ensureOutward } from './geom.js';
 
 // ------------------------------------------------------------------ STL

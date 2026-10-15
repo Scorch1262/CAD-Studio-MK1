@@ -1,5 +1,5 @@
 // Baugruppen: Komponenten, Platzierung mit Bedingungen (Koinzident/Ausrichten/Abstand), Regenerierung
-import * as THREE from 'three';
+import * as THREE from '../vendor/three.module.js';
 import { uid, evalExpr, evalParams } from './util.js';
 import { regenerate, defaultLayers } from './part.js';
 import * as G from './geom.js';

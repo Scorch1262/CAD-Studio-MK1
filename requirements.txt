@@ -1,2 +1,6 @@
 flask>=3.0
 waitress>=3.0
+# eigenes Programmfenster (Windows: WebView2, macOS: WKWebView)
+pywebview>=5.4
+# SpaceMouse direkt per USB-HID
+hidapi>=0.14

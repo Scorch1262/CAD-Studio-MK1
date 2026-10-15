@@ -1,4 +1,6 @@
-// 3Dconnexion SpaceMouse ueber WebHID (Chrome/Edge, Seite auf localhost)
+// 3Dconnexion SpaceMouse
+// Bevorzugt: nativ ueber das Programm (USB-HID per hidapi, Stream /api/sm/stream).
+// Rueckfallebene im Browser-Modus: WebHID (Chrome/Edge).
 // Unterstuetzt alte Geraete (Report 1 = Translation, 2 = Rotation) und neue (Report 1 mit 12 Byte).
 const VENDORS = [0x046d, 0x256f]; // Logitech (alte 3Dconnexion), 3Dconnexion
 
@@ -9,16 +11,35 @@ export const SM_DEFAULTS = {
 };
 
 export class SpaceMouse {
-  constructor({ onMotion, onButton, onStatus }) {
+  constructor({ onMotion, onButton, onStatus, native }) {
     this.onMotion = onMotion; this.onButton = onButton; this.onStatus = onStatus || (() => {});
     this.cfg = loadCfg();
     this.t = [0, 0, 0]; this.r = [0, 0, 0]; this.lastInput = 0; this.device = null; this.buttons = 0;
-    this.supported = 'hid' in navigator;
+    this.native = !!native?.available; this.nativeName = null;
+    this.supported = this.native || 'hid' in navigator;
+    if (this.native) { this.startNative(); return; }
     if (this.supported) {
       navigator.hid.addEventListener('disconnect', (e) => { if (e.device === this.device) { this.device = null; this.onStatus('getrennt'); } });
       navigator.hid.addEventListener('connect', () => this.autoConnect());
       this.autoConnect();
     }
+  }
+  /** Nativer Stream vom Programm */
+  startNative() {
+    this.onStatus('suche Gerät…');
+    const es = new EventSource('/api/sm/stream'); this.es = es;
+    es.onmessage = (ev) => {
+      let m; try { m = JSON.parse(ev.data); } catch { return; }
+      if (m.name !== this.nativeName) { this.nativeName = m.name; this.onStatus(m.name ? `verbunden: ${m.name}` : 'kein Gerät gefunden'); }
+      this.device = m.name ? { productName: m.name, native: true } : null;
+      const norm = (v) => Math.max(-1, Math.min(1, v / 350));
+      const moving = m.t.some(v => v) || m.r.some(v => v);
+      this.t = m.t.map(norm); this.r = m.r.map(norm);
+      if (moving) this.lastInput = performance.now(); else this.lastInput = 0;
+      const pressed = m.b & ~this.buttons; this.buttons = m.b;
+      for (let i = 0; i < 16; i++) if (pressed & (1 << i)) this.onButton?.(i + 1, this.cfg.buttons[i + 1]);
+    };
+    es.onerror = () => { this.device = null; this.nativeName = ''; this.onStatus('Verbindung zum Programm unterbrochen'); };
   }
   saveCfg() { try { localStorage.setItem('browsercad.spacemouse', JSON.stringify(this.cfg)); } catch { /* egal */ } }
 
@@ -30,6 +51,7 @@ export class SpaceMouse {
     } catch { /* keine Berechtigung */ }
   }
   async request() {
+    if (this.native) throw new Error('Die SpaceMouse wird vom Programm automatisch erkannt – einfach anstecken.');
     if (!this.supported) throw new Error('WebHID wird von diesem Browser nicht unterstützt (Chrome oder Edge verwenden).');
     const devs = await navigator.hid.requestDevice({ filters: VENDORS.map(v => ({ vendorId: v })) });
     if (!devs.length) throw new Error('Kein Gerät gewählt');
@@ -59,7 +81,9 @@ export class SpaceMouse {
   /** pro Frame aufrufen */
   frame(dt) {
     if (!this.device) return;
-    if (performance.now() - this.lastInput > 400) { this.t = [0, 0, 0]; this.r = [0, 0, 0]; return; }
+    // nativ: Werte bleiben bis zum naechsten Bericht gueltig (Geraet sendet beim Loslassen Nullen)
+    if (!this.native && performance.now() - this.lastInput > 400) { this.t = [0, 0, 0]; this.r = [0, 0, 0]; return; }
+    if (this.native && !this.lastInput) return;
     const c = this.cfg; const dz = c.deadzone; const k = c.sensitivity;
     const f = (v, inv) => { const a = Math.abs(v) < dz ? 0 : (v - Math.sign(v) * dz) / (1 - dz); return (inv ? -a : a) * k; };
     // Geraeteachsen: TX rechts, TY vor/zurueck, TZ hoch/runter (gedrueckt = +), RX kippen, RY rollen, RZ drehen

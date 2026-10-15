@@ -1,6 +1,6 @@
 // Geometriekern: Profile, Volumenkoerper, Boolesche Operationen, Netzbereinigung
-import * as THREE from 'three';
-import { Brush, Evaluator, ADDITION, SUBTRACTION, INTERSECTION } from 'three-bvh-csg';
+import * as THREE from '../vendor/three.module.js';
+import { Brush, Evaluator, ADDITION, SUBTRACTION, INTERSECTION } from '../vendor/three-bvh-csg.module.js';
 import { evalExpr } from './util.js';
 
 const V3 = (a) => new THREE.Vector3(a[0], a[1], a[2]);

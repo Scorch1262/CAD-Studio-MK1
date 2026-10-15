@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 """
-BrowserCAD - browserbasiertes CAD im Stil von PTC Creo Parametric.
+BrowserCAD - CAD-Programm im Stil von PTC Creo Parametric.
 
-Startet einen lokalen Webserver (nur 127.0.0.1) und oeffnet die Oberflaeche
-im Browser (bevorzugt als App-Fenster von Edge/Chrome, wegen WebHID fuer die
-3Dconnexion SpaceMouse).
+Laeuft als eigenstaendiges Desktop-Programm mit eigenem Fenster
+(Windows: WebView2, macOS: WKWebView ueber pywebview). Intern arbeitet ein
+lokaler Server auf 127.0.0.1, der nur vom Programmfenster genutzt wird.
+Die 3Dconnexion SpaceMouse wird direkt per USB-HID (hidapi) gelesen.
+
+Startmodi:  (Standard) eigenes Fenster
+            --browser   Oberflaeche im Standardbrowser
+            --server    nur Server (Tests/CI), auch BROWSERCAD_MODE=server
 
 Alle Dateien (Parts, Baugruppen, Importe, Exporte) liegen im Arbeitsverzeichnis,
-das beim Start in der Oberflaeche festgelegt wird.
+das beim Start festgelegt wird.
 """
 from __future__ import annotations
 
 import json
+import logging
 import mimetypes
 import os
 import platform
@@ -27,11 +33,17 @@ import urllib.request
 import webbrowser
 from pathlib import Path
 
-# --- Windowed Mac-App / exe ohne Konsole: stdout/stderr koennen None sein ---
-if sys.stdout is None:
-    sys.stdout = open(os.devnull, "w")
-if sys.stderr is None:
-    sys.stderr = open(os.devnull, "w")
+# --- Fensterprogramm ohne Konsole: Ausgaben in eine Logdatei umleiten ---
+_LOG_DIR = Path.home() / ".browsercad"
+if sys.stdout is None or sys.stderr is None or getattr(sys, "frozen", False):
+    try:
+        _LOG_DIR.mkdir(parents=True, exist_ok=True)
+        _log = open(_LOG_DIR / "browsercad.log", "w", encoding="utf-8", buffering=1)
+        sys.stdout = _log
+        sys.stderr = _log
+    except OSError:
+        sys.stdout = sys.stdout or open(os.devnull, "w")
+        sys.stderr = sys.stderr or open(os.devnull, "w")
 
 # Windows kennt .js teils als text/plain -> ES-Module wuerden nicht laden
 mimetypes.add_type("text/javascript", ".js")
@@ -65,7 +77,7 @@ DEFAULT_CONFIG = {
     "workdir": "",
     "recent": [],
     "port": DEFAULT_PORT,
-    "app_window": True,
+    "ui_mode": "desktop",  # desktop = eigenes Fenster, browser = Standardbrowser
     # Externe Konverter fuer proprietaere Formate. Platzhalter: {in} {out}
     # Ergebnis muss eine STEP-Datei unter {out} sein.
     "converters": {
@@ -181,7 +193,9 @@ def api_state():
         workdir=str(wd) if wd else "",
         recent=[r for r in CFG.get("recent", []) if Path(r).is_dir()][:10],
         converters=CFG.get("converters", {}),
-        app_window=CFG.get("app_window", True),
+        ui_mode=CFG.get("ui_mode", "desktop"),
+        mode=RUN_MODE,
+        hid=SPACEMOUSE.status(),
         platform=platform.system(),
         home=str(Path.home()),
     )
@@ -373,16 +387,244 @@ def api_config():
     with _lock:
         if isinstance(data.get("converters"), dict):
             CFG["converters"].update({k: str(v) for k, v in data["converters"].items()})
-        if "app_window" in data:
-            CFG["app_window"] = bool(data["app_window"])
+        if data.get("ui_mode") in ("desktop", "browser"):
+            CFG["ui_mode"] = data["ui_mode"]
         save_config(CFG)
+    return jsonify(ok=True)
+
+
+# ------------------------------------------------------------------ Desktop-Hilfen
+STATE = {"dirty": False, "exiting": False}
+WINDOW = None          # pywebview-Fenster (nur im Desktop-Modus)
+RUN_MODE = "server"    # desktop | browser | server
+
+
+@app.post("/api/dirty")
+def api_dirty():
+    STATE["dirty"] = bool((request.get_json(force=True) or {}).get("dirty"))
+    return jsonify(ok=True)
+
+
+@app.post("/api/import_paths")
+def api_import_paths():
+    """Dateien vom Rechner (nativer Dialog) ins Arbeitsverzeichnis kopieren."""
+    wd = workdir()
+    if wd is None:
+        return jsonify(ok=False, error="Kein Arbeitsverzeichnis"), 409
+    saved = []
+    for src in (request.get_json(force=True) or {}).get("paths", []):
+        sp = Path(src)
+        if not sp.is_file():
+            continue
+        target = wd / sp.name
+        if sp.resolve() != target.resolve():
+            shutil.copy2(sp, target)
+        saved.append(target.name)
+    return jsonify(ok=True, files=saved)
+
+
+@app.post("/api/reveal")
+def api_reveal():
+    """Datei/Ordner im Explorer bzw. Finder zeigen."""
+    rel = (request.get_json(force=True) or {}).get("path", "")
+    p = safe_path(rel) if rel else workdir()
+    if p is None or not p.exists():
+        return jsonify(ok=False, error="Nicht gefunden"), 404
+    try:
+        system = platform.system()
+        if system == "Windows":
+            if p.is_file():
+                subprocess.Popen(["explorer", "/select,", str(p)])
+            else:
+                os.startfile(str(p))  # type: ignore[attr-defined]
+        elif system == "Darwin":
+            subprocess.Popen(["open", "-R", str(p)] if p.is_file() else ["open", str(p)])
+        else:
+            subprocess.Popen(["xdg-open", str(p if p.is_dir() else p.parent)])
+    except OSError as e:
+        return jsonify(ok=False, error=str(e)), 500
+    return jsonify(ok=True)
+
+
+@app.post("/api/focus")
+def api_focus():
+    if WINDOW is not None:
+        try:
+            WINDOW.restore()
+            WINDOW.show()
+        except Exception:  # noqa: BLE001
+            pass
     return jsonify(ok=True)
 
 
 @app.post("/api/shutdown")
 def api_shutdown():
-    threading.Timer(0.4, lambda: os._exit(0)).start()
+    STATE["exiting"] = True
+    if WINDOW is not None:
+        threading.Timer(0.2, WINDOW.destroy).start()
+        threading.Timer(3.0, lambda: os._exit(0)).start()
+    else:
+        threading.Timer(0.4, lambda: os._exit(0)).start()
     return jsonify(ok=True)
+
+
+class DesktopApi:
+    """Wird im Fenster als window.pywebview.api bereitgestellt."""
+
+    def pick_folder(self, start=""):
+        import webview
+        start = start if start and Path(start).is_dir() else str(Path.home())
+        r = WINDOW.create_file_dialog(webview.FileDialog.FOLDER, directory=start)
+        return (r[0] if isinstance(r, (list, tuple)) else r) if r else None
+
+    def pick_files(self):
+        import webview
+        r = WINDOW.create_file_dialog(
+            webview.FileDialog.OPEN, directory=str(workdir() or Path.home()), allow_multiple=True,
+            file_types=("CAD-Dateien (*.stp;*.step;*.igs;*.iges;*.stl;*.prt;*.asm;*.sldprt;*.sldasm;*.bcprt;*.bcasm)",
+                        "Alle Dateien (*.*)"))
+        return list(r) if r else []
+
+    def save_copy(self, rel):
+        """Datei aus dem Arbeitsverzeichnis an einen frei gewaehlten Ort kopieren."""
+        import webview
+        src = safe_path(rel)
+        r = WINDOW.create_file_dialog(webview.FileDialog.SAVE, directory=str(Path.home()), save_filename=src.name)
+        if not r:
+            return None
+        dst = r[0] if isinstance(r, (list, tuple)) else r
+        shutil.copy2(src, dst)
+        return str(dst)
+
+    def set_title(self, title):
+        try:
+            WINDOW.set_title(str(title))
+        except Exception:  # noqa: BLE001
+            pass
+        return True
+
+
+# ------------------------------------------------------------------ SpaceMouse (USB-HID)
+class SpaceMouseHID:
+    """Liest 3Dconnexion-Geraete direkt per hidapi (Windows, macOS, Linux)."""
+
+    VENDORS = (0x046D, 0x256F)  # Logitech (alte 3Dconnexion), 3Dconnexion
+
+    def __init__(self):
+        self.t = [0, 0, 0]
+        self.r = [0, 0, 0]
+        self.buttons = 0
+        self.seq = 0
+        self.name = ""
+        self.error = ""
+        self.available = False
+        self.cond = threading.Condition()
+        try:
+            import hid  # noqa: F401
+            self.available = True
+        except Exception as e:  # noqa: BLE001
+            self.error = f"hidapi nicht verfuegbar: {e}"
+
+    def status(self):
+        return {"available": self.available, "connected": bool(self.name), "name": self.name, "error": self.error}
+
+    def start(self):
+        if self.available:
+            threading.Thread(target=self._run, name="spacemouse", daemon=True).start()
+
+    def _find(self, hid):
+        cands = []
+        for d in hid.enumerate():
+            if d.get("vendor_id") not in self.VENDORS:
+                continue
+            prod = (d.get("product_string") or "").lower()
+            multi_axis = d.get("usage_page") == 1 and d.get("usage") == 8
+            if multi_axis or "space" in prod or "3dconnexion" in (d.get("manufacturer_string") or "").lower():
+                cands.append((0 if multi_axis else 1, d))
+        cands.sort(key=lambda x: x[0])
+        return cands[0][1] if cands else None
+
+    def _run(self):
+        import hid
+        while True:
+            info = self._find(hid)
+            if not info:
+                time.sleep(2.0)
+                continue
+            dev = hid.device()
+            try:
+                dev.open_path(info["path"])
+                self.name = info.get("product_string") or "SpaceMouse"
+                self.error = ""
+                self._bump()
+                while True:
+                    data = dev.read(64, 100)
+                    if data:
+                        self._parse(bytes(data))
+            except Exception as e:  # noqa: BLE001
+                self.error = str(e) or "Geraet nicht lesbar"
+            finally:
+                try:
+                    dev.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                self.name = ""
+                self.t = [0, 0, 0]
+                self.r = [0, 0, 0]
+                self._bump()
+            time.sleep(2.0)
+
+    @staticmethod
+    def _axes(b, o):
+        return [int.from_bytes(b[o + i * 2:o + i * 2 + 2], "little", signed=True) for i in range(3)]
+
+    def _parse(self, b):
+        rid = b[0]
+        if rid == 1 and len(b) >= 7:
+            self.t = self._axes(b, 1)
+            if len(b) >= 13:
+                self.r = self._axes(b, 7)
+        elif rid == 2 and len(b) >= 7:
+            self.r = self._axes(b, 1)
+        elif rid == 3 and len(b) >= 2:
+            self.buttons = b[1] | ((b[2] << 8) if len(b) >= 3 else 0)
+        else:
+            return
+        self._bump()
+
+    def _bump(self):
+        with self.cond:
+            self.seq += 1
+            self.cond.notify_all()
+
+    def snapshot(self):
+        return {"t": self.t, "r": self.r, "b": self.buttons, "name": self.name, "seq": self.seq}
+
+
+SPACEMOUSE = SpaceMouseHID()
+
+
+@app.get("/api/sm/stream")
+def api_sm_stream():
+    """Server-Sent Events: SpaceMouse-Zustand mit bis zu 60 Hz."""
+    def gen():
+        last = -1
+        last_send = 0.0
+        yield "retry: 2000\n\n"
+        while True:
+            with SPACEMOUSE.cond:
+                SPACEMOUSE.cond.wait(timeout=1.0)
+            now = time.time()
+            if SPACEMOUSE.seq != last or now - last_send > 1.0:
+                if now - last_send < 1 / 60:
+                    time.sleep(1 / 60 - (now - last_send))
+                snap = SPACEMOUSE.snapshot()
+                last = snap["seq"]
+                last_send = time.time()
+                yield f"data: {json.dumps(snap)}\n\n"
+
+    return Response(gen(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
 
 # ------------------------------------------------------------------ Start
@@ -404,69 +646,91 @@ def running_instance(port: int) -> bool:
         return False
 
 
-def find_browser_app() -> list[str] | None:
-    """Edge/Chrome fuer ein App-Fenster suchen (WebHID fuer SpaceMouse)."""
-    system = platform.system()
-    if system == "Windows":
-        cands = [
-            os.path.expandvars(r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe"),
-            os.path.expandvars(r"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe"),
-            os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
-            os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
-            os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"),
-        ]
-        for c in cands:
-            if os.path.isfile(c):
-                return [c]
-    elif system == "Darwin":
-        for c in (
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-            "/Applications/Chromium.app/Contents/MacOS/Chromium",
-        ):
-            if os.path.isfile(c):
-                return [c]
-    else:
-        for c in ("google-chrome", "chromium", "chromium-browser", "microsoft-edge"):
-            w = shutil.which(c)
-            if w:
-                return [w]
-    return None
+def choose_mode() -> str:
+    args = {a.lower() for a in sys.argv[1:]}
+    if "--server" in args or os.environ.get("BROWSERCAD_NO_BROWSER"):
+        return "server"
+    env = (os.environ.get("BROWSERCAD_MODE") or "").lower()
+    if env in ("desktop", "browser", "server"):
+        return env
+    if "--browser" in args:
+        return "browser"
+    return CFG.get("ui_mode", "desktop")
 
 
-def open_ui(url: str) -> None:
-    if os.environ.get("BROWSERCAD_NO_BROWSER"):
-        return
-    if CFG.get("app_window", True):
-        b = find_browser_app()
-        if b:
-            try:
-                subprocess.Popen(b + [f"--app={url}", "--new-window"],
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                return
-            except OSError:
-                pass
-    webbrowser.open(url)
+def run_desktop(url: str) -> bool:
+    """Eigenes Programmfenster. Liefert False, wenn kein WebView verfuegbar ist."""
+    global WINDOW
+    try:
+        import webview
+    except Exception as e:  # noqa: BLE001
+        print(f"pywebview nicht verfuegbar ({e}) - verwende Browser.")
+        return False
+
+    WINDOW = webview.create_window(
+        f"BrowserCAD {VERSION}", url, js_api=DesktopApi(),
+        width=1440, height=900, min_size=(1024, 640), maximized=True,
+        background_color="#0b1016", text_select=False, zoomable=False,
+    )
+
+    def on_closing():
+        print(f"Fenster schliessen angefordert (ungespeichert: {STATE['dirty']})", flush=True)
+        if STATE["exiting"] or not STATE["dirty"]:
+            return True
+        # Ungespeicherte Aenderungen: Abfrage in der Oberflaeche, Schliessen erst nach Bestaetigung
+        threading.Thread(target=lambda: WINDOW.evaluate_js("window.BrowserCAD && BrowserCAD.requestExit()"), daemon=True).start()
+        return False
+
+    WINDOW.events.closing += on_closing
+    storage = CONFIG_DIR / "webview"
+    storage.mkdir(parents=True, exist_ok=True)
+    try:
+        webview.start(private_mode=False, storage_path=str(storage), debug=bool(os.environ.get("BROWSERCAD_DEBUG")))
+    except Exception as e:  # noqa: BLE001
+        print(f"Programmfenster konnte nicht geoeffnet werden ({e}) - verwende Browser.")
+        WINDOW = None
+        return False
+    return True
 
 
 def main() -> None:
+    global RUN_MODE
+    RUN_MODE = choose_mode()
     port = int(os.environ.get("BROWSERCAD_PORT") or CFG.get("port") or DEFAULT_PORT)
     if running_instance(port):
-        print(f"BrowserCAD laeuft bereits auf Port {port} - oeffne Oberflaeche.")
-        open_ui(f"http://127.0.0.1:{port}/")
+        print(f"BrowserCAD laeuft bereits (Port {port}).")
+        if RUN_MODE == "browser":
+            webbrowser.open(f"http://127.0.0.1:{port}/")
+        else:
+            try:
+                urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{port}/api/focus", data=b"{}", method="POST"), timeout=2)
+            except Exception:  # noqa: BLE001
+                pass
         return
     while not port_free(port):
         port += 1
     url = f"http://127.0.0.1:{port}/"
-    print("=" * 60, flush=True)
-    print(f"  BrowserCAD {VERSION}")
-    print(f"  Oberflaeche: {url}")
-    print("  Beenden: Datei > Beenden oder dieses Fenster schliessen", flush=True)
-    print("=" * 60, flush=True)
-    threading.Timer(1.0, open_ui, args=(url,)).start()
-    from waitress import serve
+    print(f"BrowserCAD {VERSION} - Modus {RUN_MODE} - {url}", flush=True)
 
-    serve(app, host="127.0.0.1", port=port, threads=8, max_request_body_size=1024 ** 3, _quiet=True)
+    from waitress import create_server
+    logging.getLogger("waitress.queue").setLevel(logging.ERROR)
+    server = create_server(app, host="127.0.0.1", port=port, threads=12,
+                           max_request_body_size=1024 ** 3)
+    SPACEMOUSE.start()
+
+    if RUN_MODE == "server":
+        server.run()
+        return
+
+    threading.Thread(target=server.run, name="server", daemon=True).start()
+    if RUN_MODE == "desktop" and run_desktop(url):
+        os._exit(0)  # Fenster geschlossen -> Programm beenden
+
+    RUN_MODE = "browser"
+    webbrowser.open(url)
+    print("Oberflaeche im Browser geoeffnet. Beenden: Datei > Beenden.", flush=True)
+    while True:
+        time.sleep(3600)
 
 
 if __name__ == "__main__":
