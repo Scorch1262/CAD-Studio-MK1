@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BrowserCAD</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2l9 5v10l-9 5-9-5V7z' fill='%2329c8ff'/%3E%3Cpath d='M12 12l9-5M12 12v10M12 12L3 7' stroke='%230b1016' stroke-width='1.5'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="css/app.css">
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "./vendor/three.module.js",
+      "three/addons/": "./vendor/addons/",
+      "three-mesh-bvh": "./vendor/three-mesh-bvh.module.js",
+      "three-bvh-csg": "./vendor/three-bvh-csg.module.js"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="app">
+    <header id="titlebar">
+      <div class="brand"><svg viewBox="0 0 24 24" width="20" height="20"><path d="M12 2l9 5v10l-9 5-9-5V7z" fill="#29c8ff"/><path d="M12 12l9-5M12 12v10M12 12L3 7" stroke="#0b1016" stroke-width="1.5"/></svg><b>BrowserCAD</b><span id="version"></span></div>
+      <div class="qat">
+        <button title="Neu (Strg+N)" data-cmd="new"></button><button title="Öffnen (Strg+O)" data-cmd="open"></button><button title="Speichern (Strg+S)" data-cmd="save"></button>
+        <span class="sep"></span><button title="Rückgängig (Strg+Z)" data-cmd="undo"></button><button title="Wiederherstellen (Strg+Y)" data-cmd="redo"></button>
+        <button title="Regenerieren (Strg+G)" data-cmd="regen"></button><span class="sep"></span><button title="Fenster schließen" data-cmd="close"></button>
+      </div>
+      <div id="doc-title"></div>
+      <div class="tr"><button class="btn sm ghost" data-cmd="help" title="Hilfe">?</button><button class="btn sm ghost" data-cmd="exit" title="BrowserCAD beenden">Beenden</button></div>
+    </header>
+    <nav id="ribbon-tabs"></nav>
+    <div id="ribbon"></div>
+    <div id="main">
+      <aside id="nav">
+        <div id="nav-tabs">
+          <button data-tab="tree" title="Modellbaum">Modellbaum</button>
+          <button data-tab="layers" title="Layerbaum">Layer</button>
+          <button data-tab="folder" title="Ordner-Browser">Ordner</button>
+        </div>
+        <div id="nav-body"></div>
+      </aside>
+      <section id="center">
+        <div id="doctabs"></div>
+        <div id="dashboard" hidden></div>
+        <div id="viewport"><div id="igt"></div></div>
+      </section>
+      <aside id="side" hidden></aside>
+    </div>
+    <footer id="statusbar">
+      <span id="status-msg" class="status-msg"></span>
+      <span id="sm-status" class="pill">SpaceMouse: –</span>
+      <span id="workdir" class="pill path" title="Arbeitsverzeichnis"></span>
+    </footer>
+  </div>
+  <div id="modal-root"></div>
+  <div id="ctx-menu"></div>
+  <div id="toasts"></div>
+  <div id="busy" hidden><div class="spinner"></div><div id="busy-msg"></div></div>
+  <script type="module">
+    import { icon } from './js/ui.js';
+    const map = { new: 'new', open: 'open', save: 'save', undo: 'undo', redo: 'redo', regen: 'regen', close: 'window' };
+    for (const b of document.querySelectorAll('.qat button')) b.append(icon(map[b.dataset.cmd]));
+    document.addEventListener('click', (e) => { const b = e.target.closest('[data-cmd]'); if (b && window.BrowserCAD) window.BrowserCAD.run(b.dataset.cmd); });
+  </script>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

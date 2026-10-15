@@ -1,0 +1,123 @@
+name: Build und Release
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: Windows
+          - os: macos-latest
+            label: macOS
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Abhaengigkeiten installieren
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Kurztest (Server startet, Oberflaeche wird ausgeliefert)
+        shell: bash
+        env:
+          BROWSERCAD_NO_BROWSER: '1'
+          BROWSERCAD_PORT: '8877'
+        run: |
+          python browsercad.py &
+          PID=$!
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8877/api/state > /dev/null; then break; fi
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:8877/api/state
+          curl -sf -o /dev/null http://127.0.0.1:8877/
+          curl -sf -o /dev/null http://127.0.0.1:8877/js/app.js
+          curl -sf -o /dev/null http://127.0.0.1:8877/vendor/occt/occt-import-js.wasm
+          kill $PID || true
+
+      - name: PyInstaller
+        run: pyinstaller --noconfirm --clean BrowserCAD.spec
+
+      - name: Paket Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $v = (Get-Content VERSION -Raw).Trim()
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Copy-Item dist/BrowserCAD.exe "out/BrowserCAD-$v-windows-x64.exe"
+
+      - name: Paket macOS
+        if: runner.os == 'macOS'
+        run: |
+          v=$(tr -d '[:space:]' < VERSION)
+          arch=$(uname -m)
+          mkdir -p out
+          # ad-hoc signieren, damit die App auf Apple Silicon startet
+          codesign --force --deep --sign - dist/BrowserCAD.app || true
+          ditto -c -k --sequesterRsrc --keepParent dist/BrowserCAD.app "out/BrowserCAD-$v-macos-$arch.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BrowserCAD-${{ matrix.label }}
+          path: out/*
+          if-no-files-found: error
+
+  release:
+    name: Release erstellen
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Version und Tag bestimmen
+        id: ver
+        run: |
+          v=$(tr -d '[:space:]' < VERSION)
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=v$v-build${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Release-Text
+        run: |
+          {
+            echo "BrowserCAD ${{ steps.ver.outputs.version }} (Build ${{ github.run_number }})"
+            echo
+            echo "- Windows: BrowserCAD-*-windows-x64.exe starten"
+            echo "- macOS: ZIP entpacken, BrowserCAD.app per Rechtsklick > Oeffnen starten (nicht signiert)"
+            echo
+            echo "Die Oberflaeche oeffnet sich im Browser (Edge/Chrome empfohlen, fuer die SpaceMouse erforderlich)."
+            echo
+            awk '/^## /{n++} n==1' CHANGELOG.md
+          } > release_notes.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: BrowserCAD ${{ steps.ver.outputs.version }} (Build ${{ github.run_number }})
+          body_path: release_notes.md
+          files: dist/*
+          make_latest: true
