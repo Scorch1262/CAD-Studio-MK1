@@ -1,4 +1,4 @@
-// BrowserCAD - Hauptanwendung
+// CAD-Studio-MK1 - Hauptanwendung
 import * as THREE from '../vendor/three.module.js';
 import { TransformControls } from '../vendor/addons/controls/TransformControls.js';
 import { $, el, api, apiJson, readFileBytes, readFileText, writeFile, downloadBlob, clone, debounce, fmt, stem, baseName, evalParams, evalExpr, uid } from './util.js';
@@ -6,7 +6,7 @@ import * as G from './geom.js';
 import { Viewer, VIEWS } from './viewer.js';
 import { Sketcher, SKETCH_TOOLS } from './sketcher.js';
 import { SpaceMouse } from './spacemouse.js';
-import { PART_FORMAT, FEATURE_INFO, newPart, regenerate, makeFeature, importFeature, dependents, hiddenByLayer, planeRef, setKernel, KERNEL, edgeRefFromPoly } from './part.js';
+import { PART_FORMAT, FEATURE_INFO, newPart, regenerate, makeFeature, importFeature, dependents, hiddenByLayer, planeRef, setKernel, KERNEL, edgeRefFromPoly, normalizeFormat, isLegacyPath } from './part.js';
 import { ASM_FORMAT, ASM_DATUMS, CONSTRAINT_NAMES, newAssembly, newComponent, regenerateAssembly, flattenBodies, entryBox } from './assembly.js';
 import { buildBody, buildDatums, applyDisplayStyle, highlightMesh, faceGroup, DATUM_COLOR } from './render.js';
 import { parseSTL, writeSTL, readCAD, writeSTEP, writeUSDA } from './io.js';
@@ -18,14 +18,14 @@ const App = {
   sel: [], picking: null, sketcher: null, busy: false, tab: 'model', navTab: 'tree',
   partCache: new Map(), files: [], tctl: null,
 };
-window.BrowserCAD = App;
+window.CADStudio = App;
 App.run = (id) => runCmd(id);
 
 function loadDisplay() {
-  const d = { style: 'shadedEdges', planes: true, axes: true, points: true, csys: true, tags: true, spin: true };
-  try { return { ...d, ...JSON.parse(localStorage.getItem('browsercad.display') || '{}') }; } catch { return d; }
+  const d = { style: 'shadedEdges', planes: true, axes: true, points: true, csys: true, sketches: true, tags: true, spin: true };
+  try { return { ...d, ...JSON.parse(localStorage.getItem('cadstudio.display') || '{}') }; } catch { return d; }
 }
-function saveDisplay() { try { localStorage.setItem('browsercad.display', JSON.stringify(App.display)); } catch { /* egal */ } }
+function saveDisplay() { try { localStorage.setItem('cadstudio.display', JSON.stringify(App.display)); } catch { /* egal */ } }
 const doc = () => App.active;
 const d0 = doc;
 const isPart = (d = doc()) => d && d.kind === 'part';
@@ -63,7 +63,7 @@ async function init() {
   });
   if (!App.sm.supported) $('#sm-status').textContent = 'SpaceMouse: nicht verfügbar';
   $('#version').textContent = `v${App.server.version}`;
-  document.title = `BrowserCAD ${App.server.version}`;
+  document.title = `CAD-Studio-MK1 ${App.server.version}`;
   renderRibbon(); renderDocTabs(); renderNav();
   await workdirDialog(true);
   newDoc('part', nextDefaultName('part'), true);
@@ -100,7 +100,7 @@ function debounceFrame(fn) { let pending = null; return (e) => { const first = !
 // =====================================================================================
 async function workdirDialog(initial = false) {
   const st = await api('/api/state'); App.server = st;
-  const inp = el('input', { class: 'w100', value: st.workdir || st.recent[0] || `${st.home}${st.platform === 'Windows' ? '\\' : '/'}BrowserCAD-Arbeit` });
+  const inp = el('input', { class: 'w100', value: st.workdir || st.recent[0] || `${st.home}${st.platform === 'Windows' ? '\\' : '/'}CAD-Studio-MK1-Arbeit` });
   const create = el('input', { type: 'checkbox', checked: true });
   const err = el('div', { class: 'dash-err' });
   const recent = st.recent.length ? el('div', { class: 'recent' }, el('div', { class: 'muted small' }, 'Zuletzt verwendet:'),
@@ -124,6 +124,7 @@ async function workdirDialog(initial = false) {
   if (res) {
     App.server = await api('/api/state'); $('#workdir').textContent = App.server.workdir;
     status(`Arbeitsverzeichnis: ${App.server.workdir}`, 'ok', 5000); await refreshFiles();
+    await offerLegacyMigration();
   }
 }
 
@@ -144,6 +145,17 @@ async function folderBrowser(start) {
   return modal({ title: 'Ordner wählen', width: 560, body: el('div', {}, pathEl, list, el('div', { class: 'muted small' }, 'Doppelklick öffnet einen Ordner.')),
     buttons: [{ label: 'Abbrechen', value: null }, { label: 'Diesen Ordner wählen', primary: true, value: () => {
       const s = list.querySelector('.fitem.sel'); if (s && s.textContent !== '..') return `${cur}${cur.endsWith('/') || cur.endsWith('\\') ? '' : (cur.includes('\\') ? '\\' : '/')}${s.textContent}`; return cur; } }] });
+}
+
+/** Dateien der Vorgaengerversion (.bcprt/.bcasm) gefunden? Umwandlung anbieten */
+async function offerLegacyMigration(force = false) {
+  const n = App.files.filter(f => f.legacy).length; if (!n) { if (force) toast('Keine Dateien im alten Format gefunden', 'info'); return; }
+  if (!(await confirmDialog('Dateien im alten Format', `Im Arbeitsverzeichnis liegen ${n} Part-/Baugruppendatei(en) im alten Format (.bcprt/.bcasm). In das aktuelle Format (.csprt/.csasm) umwandeln? Die Originale bleiben erhalten, Verweise in Baugruppen werden angepasst.`, 'Umwandeln'))) return;
+  try {
+    const r = await apiJson('/api/migrate_legacy', {});
+    await refreshFiles();
+    toast(`${r.converted.length} umgewandelt${r.skipped.length ? `, ${r.skipped.length} übersprungen (neue Datei existiert schon)` : ''}${r.errors.length ? `, ${r.errors.length} Fehler` : ''}`, r.errors.length ? 'warn' : 'ok', 6000);
+  } catch (e) { toast(e.message, 'err'); }
 }
 
 async function refreshFiles() {
@@ -197,7 +209,7 @@ function updateTitle() {
   const d = doc();
   const t = d ? `${d.data.name.toUpperCase()}${d.kind === 'part' ? ' (Part)' : ' (Baugruppe)'}${d.dirty ? ' *' : ''}` : '';
   $('#doc-title').textContent = t;
-  const full = `BrowserCAD ${App.server?.version || ''}${t ? ' – ' + t : ''}`;
+  const full = `CAD-Studio-MK1 ${App.server?.version || ''}${t ? ' – ' + t : ''}`;
   document.title = full;
   if (full !== App._winTitle) { App._winTitle = full; nativeApi()?.set_title(full); }
   syncDirty();
@@ -249,7 +261,7 @@ async function loadDocForAsm(file) {
   const open = App.docs.find(x => x.path === file);
   if (open) return open.data;
   const txt = await readFileText(file);
-  return JSON.parse(txt);
+  return normalizeFormat(JSON.parse(txt));
 }
 
 // ---------------------------------------------------------------- Aenderungen mit Undo
@@ -310,8 +322,9 @@ async function openFile(path) {
   const kind = App.files.find(f => f.path === path)?.kind || kindOf(path);
   await busy(`Öffne ${path}…`, async () => {
     if (kind === 'part' || kind === 'assembly') {
-      const data = JSON.parse(await readFileText(path));
-      if (![PART_FORMAT, ASM_FORMAT].includes(data.format)) throw new Error('Keine BrowserCAD-Datei');
+      const data = normalizeFormat(JSON.parse(await readFileText(path)));
+      if (![PART_FORMAT, ASM_FORMAT].includes(data.format)) throw new Error('Keine CAD-Studio-MK1-Datei');
+      if (isLegacyPath(path)) toast('Datei im alten Format – beim Speichern entsteht eine Datei mit neuer Endung (.csprt/.csasm).', 'info', 6000);
       const d = makeDoc(data.format === PART_FORMAT ? 'part' : 'assembly', data, path); await activate(d, true);
     } else {
       const meshes = await readForeign(path, kind);
@@ -319,13 +332,13 @@ async function openFile(path) {
       data.features.push(importFeature(data, `Import ${baseName(path)}`, meshes.length > 1 ? G.concatGeoms(meshes.map(m => m.geom)) : meshes[0].geom, path));
       if (meshes[0].color) data.color = `#${new THREE.Color(...meshes[0].color).getHexString()}`;
       const d = makeDoc('part', data, null); d.dirty = true; await activate(d, true);
-      toast(`${baseName(path)} importiert (${meshes.length} Körper). Speichern legt ${data.name}.bcprt an.`, 'ok', 5000);
+      toast(`${baseName(path)} importiert (${meshes.length} Körper). Speichern legt ${data.name}.csprt an.`, 'ok', 5000);
     }
   });
 }
 function kindOf(p) {
   const n = p.toLowerCase().replace(/\.\d+$/, '');
-  if (n.endsWith('.bcprt')) return 'part'; if (n.endsWith('.bcasm')) return 'assembly'; if (/\.(stp|step)$/.test(n)) return 'step';
+  if (n.endsWith('.csprt') || n.endsWith('.bcprt')) return 'part'; if (n.endsWith('.csasm') || n.endsWith('.bcasm')) return 'assembly'; if (/\.(stp|step)$/.test(n)) return 'step';
   if (/\.(igs|iges)$/.test(n)) return 'iges'; if (n.endsWith('.stl')) return 'stl'; if (/\.(prt|asm)$/.test(n)) return 'creo'; if (/\.(sldprt|sldasm)$/.test(n)) return 'solidworks'; return 'other';
 }
 /** Fremdformat -> [{name, geom, color}] */
@@ -337,7 +350,7 @@ async function readForeign(path, kind) {
         await modal({ title: `${KIND_LABEL[kind]}-Datei`, width: 560, body: el('div', {},
           el('p', {}, 'Native Creo- (.prt/.asm) und SolidWorks-Dateien (.sldprt/.sldasm) sind geschlossene, herstellerspezifische Formate. Ohne die Hersteller-Software oder einen lizenzierten Konverter lassen sie sich nicht auslesen.'),
           el('p', {}, el('b', {}, 'So geht es: '), 'Im Ursprungsprogramm als STEP speichern (Creo: Datei › Speichern als › STEP; SolidWorks: Datei › Speichern unter › STEP AP214) und die .stp-Datei öffnen.'),
-          el('p', {}, 'Oder unter ', el('b', {}, 'Werkzeuge › Optionen'), ' einen Konverter-Befehl hinterlegen (z. B. CAD Exchanger CLI). BrowserCAD ruft ihn dann automatisch auf und importiert das STEP-Ergebnis.')) });
+          el('p', {}, 'Oder unter ', el('b', {}, 'Werkzeuge › Optionen'), ' einen Konverter-Befehl hinterlegen (z. B. CAD Exchanger CLI). CAD-Studio-MK1 ruft ihn dann automatisch auf und importiert das STEP-Ergebnis.')) });
         throw new Error('Import abgebrochen');
       }
       throw e;
@@ -351,7 +364,8 @@ async function readForeign(path, kind) {
 async function saveDoc(d = doc(), asName = null) {
   if (!d) return;
   if (asName) { d.data.name = asName; d.path = null; }
-  const ext = d.kind === 'part' ? 'bcprt' : 'bcasm';
+  const ext = d.kind === 'part' ? 'csprt' : 'csasm';
+  if (isLegacyPath(d.path)) { d.path = d.path.replace(/\.(bcprt|bcasm)$/i, `.${ext}`); toast(`Gespeichert im aktuellen Format: ${d.path}`, 'info', 5000); }
   if (!d.path) {
     const target = `${d.data.name.toLowerCase()}.${ext}`;
     if (App.files.some(f => f.path === target) && !asName && !(await confirmDialog('Datei existiert', `${target} existiert bereits im Arbeitsverzeichnis. Überschreiben?`, 'Überschreiben', true))) return;
@@ -462,6 +476,7 @@ function pickables(kinds) {
     if (o.userData.role === 'edges' && kinds.includes('edge')) objs.push(o);
     if (o.userData.pick === 'plane' && kinds.includes('plane')) objs.push(o);
     if (o.userData.pick === 'axis' && kinds.includes('axis')) objs.push(o);
+    if (o.userData.pick === 'sketch' && kinds.includes('sketch')) objs.push(o);
   });
   return objs;
 }
@@ -469,7 +484,8 @@ function pickables(kinds) {
 function hitTest(ev, kinds, filter) {
   const hits = App.viewer.pick(ev, pickables(kinds)).filter(h => !filter || filter(h));
   if (!hits.length) return null;
-  const surf = hits.find(h => h.object.userData.role === 'body' || h.object.userData.pick === 'plane');
+  // nur echte Koerperflaechen verdecken – die transparente Flaeche einer Bezugsebene nicht
+  const surf = hits.find(h => h.object.userData.role === 'body');
   let h = hits[0];
   if (kinds.includes('edge')) {
     const eh = hits.find(x => x.object.userData.role === 'edges');
@@ -479,12 +495,18 @@ function hitTest(ev, kinds, filter) {
   // wie Creo: Geometrie hat Vorrang vor der (transparenten) Flaeche einer Bezugsebene; Ebenen per Rand/Baum waehlbar
   const body = hits.find(x => x.object.userData.role === 'body');
   if (h.object.userData.pick === 'plane' && !h.object.userData.outline && body && kinds.includes('face')) h = body;
+  // Skizzenlinien liegen meist auf einer Flaeche: sie haben Vorrang vor Flaeche, Ebene und Kante
+  if (kinds.includes('sketch')) {
+    const sh = hits.find(x => x.object.userData.pick === 'sketch');
+    if (sh && (!surf || sh.distance <= surf.distance + (App.viewer.modelRadius || 100) * 0.02)) h = sh;
+  }
   return toResult(h);
 }
 function toResult(h) {
   const o = h.object; const u = o.userData;
   if (u.pick === 'plane') return { kind: 'plane', ref: u.id, name: u.name, obj: o };
   if (u.pick === 'axis') return { kind: 'axis', ref: u.id, name: u.name, obj: o };
+  if (u.pick === 'sketch') return { kind: 'sketch', ref: u.id, name: u.name, obj: o };
   if (u.role === 'edges') {
     const p = o.geometry.attributes.position; const i = h.index - (h.index % 2);
     const a = new THREE.Vector3().fromBufferAttribute(p, i), b = new THREE.Vector3().fromBufferAttribute(p, i + 1);
@@ -529,7 +551,7 @@ function clearPick(result = null) {
 
 function onViewHover(ev) {
   if (!ev) { App.hl.clear(); App.viewer.request(); return; }
-  const kinds = App.picking ? App.picking.kinds : isAsm() ? ['face', 'plane', 'axis'] : ['face', 'plane', 'axis', 'edge'];
+  const kinds = App.picking ? App.picking.kinds : isAsm() ? ['face', 'plane', 'axis'] : ['sketch', 'face', 'plane', 'axis', 'edge'];
   const r = hitTest(ev, kinds, App.picking?.filter);
   drawHl(App.hl, r, App.picking ? 0x4ce06a : 0x29c8ff);
 }
@@ -541,14 +563,14 @@ function onViewClick(ev) {
     clearPick(r); return;
   }
   // normale Auswahl
-  const r = hitTest(ev, isAsm() ? ['face', 'plane', 'axis'] : ['face', 'plane', 'axis', 'edge']);
+  const r = hitTest(ev, isAsm() ? ['face', 'plane', 'axis'] : ['sketch', 'face', 'plane', 'axis', 'edge']);
   App.sel = r ? [r] : [];
   drawHl(App.selHl, r, 0xffb020);
   if (r?.ref) highlightTree(r.ref); else if (r?.compId) highlightTree(r.compId); else highlightTree(null);
   if (r) status(`Gewählt: ${r.name}${r.compId ? ' (' + (doc().data.components.find(c => c.id === r.compId)?.name || '') + ')' : ''}`, 'info', 4000);
 }
 function onViewDbl(ev) {
-  const r = hitTest(ev, ['plane', 'axis']);
+  const r = hitTest(ev, ['sketch', 'plane', 'axis']);
   const d = doc();
   if (r && isPart(d)) { const f = d.data.features.find(x => x.id === r.ref); if (f) editFeature(f); }
 }
@@ -667,6 +689,44 @@ function selectedPlaneRef() {
   const r = App.sel[0]; if (!r) return null;
   if (r.kind === 'plane') return r.ref; if (r.kind === 'face' && !r.compId) return r.plane; return null;
 }
+/** Vorhandene Skizze (Verweis) oder Skizzierebene fuer Extrudieren/Drehen */
+function selectedSketchRef() {
+  const r = App.sel[0]; if (r?.kind === 'sketch') return r.ref;
+  const f = doc()?.data.features.find(x => x.id === App.treeSel); return f?.type === 'sketch' ? f.id : null;
+}
+async function askSketchSource() {
+  const sr = selectedSketchRef(); if (sr) return { ref: sr };
+  const pre = selectedPlaneRef(); if (pre) return { plane: pre };
+  const r = await pick({ kinds: ['sketch', 'plane', 'face'], prompt: 'Vorhandene Skizze oder Skizzierebene (Bezugsebene / ebene Fläche) wählen' });
+  if (!r) return null;
+  if (r.kind === 'sketch') return { ref: r.ref };
+  return { plane: r.kind === 'face' ? r.plane : r.ref };
+}
+/** Skizzen-Features vor der Einfuegemarke (fuer Auswahllisten) */
+function sketchOptions(excludeId) {
+  const d = doc(); const ins = d.data.insertAt ?? d.data.features.length;
+  return d.data.features.filter((f, i) => f.type === 'sketch' && f.id !== excludeId && (i < ins || d.data.insertAt == null)).map(f => [f.id, f.name]);
+}
+async function editSketchFeature(id) {
+  const f = doc().data.features.find(x => x.id === id); if (!f) { toast('Skizze nicht gefunden', 'err'); return false; }
+  const ff = clone(f);
+  if (await editSketch(ff.params, ff.name)) { await commit((data) => { data.features[data.features.findIndex(x => x.id === id)] = ff; }); return true; }
+  await rebuild(); return false;
+}
+async function featSketch(existing) {
+  if (!isPart()) return;
+  if (existing) { await editSketchFeature(existing.id); return; }
+  const pl = selectedPlaneRef() || await (async () => { const r = await pick({ kinds: ['plane', 'face'], prompt: 'Skizzierebene wählen: Bezugsebene oder ebene Fläche' }); return r ? (r.kind === 'face' ? r.plane : r.ref) : null; })();
+  if (!pl) return;
+  const feat = makeFeature(doc().data, 'sketch', { plane: pl, entities: [] });
+  if (await editSketch(feat.params, feat.name)) {
+    if (!feat.params.entities.length) { toast('Leere Skizze – nicht angelegt', 'warn'); await rebuild(); return; }
+    await commit((data) => insertFeature(data, feat));
+    App.treeSel = feat.id; App.sel = [{ kind: 'sketch', ref: feat.id, name: feat.name }]; highlightTree(feat.id);
+    status(`${feat.name} angelegt – jetzt z. B. Extrudieren oder Drehen wählen, die Skizze ist schon ausgewählt`, 'ok', 8000);
+  } else await rebuild();
+}
+
 async function askSketchPlane() {
   const pre = selectedPlaneRef(); if (pre) return pre;
   const r = await pick({ kinds: ['plane', 'face'], prompt: 'Skizzierebene wählen: Bezugsebene oder ebene Fläche' });
@@ -677,10 +737,12 @@ async function featExtrude(existing) {
   if (!isPart()) return;
   const feat = existing ? clone(existing) : makeFeature(doc().data, 'extrude', { sketch: { plane: null, entities: [] }, depth: 20, side: 'one', op: 'add', flip: false, through: false });
   if (!existing) {
-    const pl = await askSketchPlane(); if (!pl) return;
-    feat.params.sketch.plane = pl;
-    if (!(await editSketch(feat.params.sketch, feat.name))) { rebuild(); return; }
-    if (doc().res.body) feat.params.op = 'add';
+    const src = await askSketchSource(); if (!src) return;
+    if (src.ref) feat.params.sketch = { ref: src.ref, plane: null, entities: [] };
+    else {
+      feat.params.sketch.plane = src.plane;
+      if (!(await editSketch(feat.params.sketch, feat.name))) { rebuild(); return; }
+    }
   }
   openExtrudeDash(feat, existing);
 }
@@ -689,11 +751,14 @@ async function featRevolve(existing) {
   if (!isPart()) return;
   const feat = existing ? clone(existing) : makeFeature(doc().data, 'revolve', { sketch: { plane: null, entities: [] }, angle: 360, axis: 'centerline', op: 'add', flip: false });
   if (!existing) {
-    const pl = await askSketchPlane(); if (!pl) return;
-    feat.params.sketch.plane = pl;
-    status('Mittellinie als Rotationsachse zeichnen, dann die Kontur auf einer Seite davon', 'info');
-    feat.params.sketch.entities = [{ type: 'centerline', x1: 0, y1: 0, x2: 0, y2: 10 }];
-    if (!(await editSketch(feat.params.sketch, feat.name))) { rebuild(); return; }
+    const src = await askSketchSource(); if (!src) return;
+    if (src.ref) feat.params.sketch = { ref: src.ref, plane: null, entities: [] };
+    else {
+      feat.params.sketch.plane = src.plane;
+      status('Mittellinie als Rotationsachse zeichnen, dann die Kontur auf einer Seite davon', 'info');
+      feat.params.sketch.entities = [{ type: 'centerline', x1: 0, y1: 0, x2: 0, y2: 10 }];
+      if (!(await editSketch(feat.params.sketch, feat.name))) { rebuild(); return; }
+    }
   }
   openRevolveDash(feat, existing);
 }
@@ -706,19 +771,27 @@ function openRevolveDash(feat, existing) {
       { key: 'axis', label: 'Achse', type: 'select', value: p.axis || 'centerline', options: [['centerline', 'Mittellinie der Skizze'], ['H', 'Horizontale Skizzenreferenz'], ['V', 'Vertikale Skizzenreferenz']] },
       { key: 'flip', label: 'Richtung umkehren', type: 'check', value: !!p.flip },
       { key: 'op', label: 'Material', type: 'select', value: p.op || 'add', options: [['add', 'Hinzufügen'], ['cut', 'Entfernen']] },
-      { key: 'plane', label: 'Skizzierebene', type: 'select', ref: ['plane', 'face'], value: p.sketch.plane, options: (v) => planeOptions(v, 'plane') },
+      { key: 'skref', label: 'Skizze', type: 'select', value: p.sketch.ref || '', rerender: true, options: () => [['', 'Eigene Skizze im Feature'], ...sketchOptions()] },
+      { key: 'plane', label: 'Skizzierebene', type: 'select', ref: ['plane', 'face'], value: p.sketch.plane, options: (v) => planeOptions(v, 'plane'), show: (v) => !v.skref },
       { type: 'button', label: 'Skizze bearbeiten', icon: 'sketch', onClick: async (vals) => {
-        closeDash(); Object.assign(feat.params, { angle: vals.angle, axis: vals.axis, flip: vals.flip, op: vals.op }); feat.params.sketch.plane = vals.plane;
-        await rebuild(); await editSketch(feat.params.sketch, feat.name); openRevolveDash(feat, existing);
+        closeDash(); Object.assign(feat.params, { angle: vals.angle, axis: vals.axis, flip: vals.flip, op: vals.op }); feat.params.sketch = sketchParam(feat.params.sketch, vals);
+        if (feat.params.sketch.ref) await editSketchFeature(feat.params.sketch.ref); else { await rebuild(); await editSketch(feat.params.sketch, feat.name); }
+        openRevolveDash(feat, existing);
       } },
     ],
-    apply: (v, f) => Object.assign(f.params, { angle: v.angle, axis: v.axis, flip: v.flip, op: v.op, sketch: { ...f.params.sketch, plane: v.plane } }),
+    apply: (v, f) => Object.assign(f.params, { angle: v.angle, axis: v.axis, flip: v.flip, op: v.op, sketch: sketchParam(f.params.sketch, v) }),
   });
+}
+/** Skizzen-Parameter aus Dashboard-Werten: Verweis auf Skizzen-Feature oder eigene Skizze */
+function sketchParam(sk, v) {
+  const out = { plane: sk.plane ?? null, entities: sk.entities || [] };
+  if (v.skref) out.ref = v.skref; else if (v.plane !== undefined) out.plane = v.plane;
+  return out;
 }
 /** Creo-Verhalten: Schnittrichtung so waehlen, dass Material entfernt wird */
 async function cutDirection(feat, v) {
   const d = doc(); if (!d.res.display) return !!v.flip;
-  const vol = async (flip) => { const t = clone(feat); Object.assign(t.params, { side: v.side, depth: v.depth, depth2: v.depth2, through: v.through, op: 'cut', flip }); t.params.sketch.plane = v.plane;
+  const vol = async (flip) => { const t = clone(feat); Object.assign(t.params, { side: v.side, depth: v.depth, depth2: v.depth2, through: v.through, op: 'cut', flip }); t.params.sketch = sketchParam(t.params.sketch, { skref: v.skref ?? t.params.sketch.ref, plane: v.plane });
     const r = await regenerate(d.data, { extra: t, preview: true, replaceId: d.data.features.some(x => x.id === feat.id) ? feat.id : undefined });
     if (r.errors.some(e => e.id === feat.id)) return Infinity;
     return r.props?.volume ?? (r.display ? G.signedVolume(r.display) : 0); };
@@ -727,7 +800,7 @@ async function cutDirection(feat, v) {
 async function openExtrudeDash(feat, existing) {
   const p = feat.params;
   // Neues Feature auf vorhandenem Koerper: Richtung vorschlagen (ins Material bei Entfernen)
-  if (!existing && d0().res.display && p.op === 'cut' && p._dirAuto === undefined) { p._dirAuto = true; p.flip = await cutDirection(feat, { ...p, plane: p.sketch.plane }); }
+  if (!existing && d0().res.display && p.op === 'cut' && p._dirAuto === undefined) { p._dirAuto = true; p.flip = await cutDirection(feat, { ...p, plane: p.sketch.plane, skref: p.sketch.ref }); }
   runFeature({
     feat, replaceId: existing?.id, title: feat.name,
     fields: [
@@ -737,13 +810,15 @@ async function openExtrudeDash(feat, existing) {
       { key: 'through', label: 'Durch alles', type: 'check', value: !!p.through, rerender: true },
       { key: 'flip', label: 'Richtung umkehren', type: 'check', value: !!p.flip },
       { key: 'op', label: 'Material', type: 'select', value: p.op || 'add', options: [['add', 'Hinzufügen'], ['cut', 'Entfernen']], after: async (v) => { if (v.op === 'cut') v.flip = await cutDirection(feat, v); } },
-      { key: 'plane', label: 'Skizzierebene', type: 'select', ref: ['plane', 'face'], value: p.sketch.plane, options: (v) => planeOptions(v, 'plane') },
+      { key: 'skref', label: 'Skizze', type: 'select', value: p.sketch.ref || '', rerender: true, options: () => [['', 'Eigene Skizze im Feature'], ...sketchOptions()] },
+      { key: 'plane', label: 'Skizzierebene', type: 'select', ref: ['plane', 'face'], value: p.sketch.plane, options: (v) => planeOptions(v, 'plane'), show: (v) => !v.skref },
       { type: 'button', label: 'Skizze bearbeiten', icon: 'sketch', onClick: async (vals) => {
-        closeDash(); Object.assign(feat.params, { side: vals.side, depth: vals.depth, depth2: vals.depth2, through: vals.through, flip: vals.flip, op: vals.op }); feat.params.sketch.plane = vals.plane;
-        await rebuild(); await editSketch(feat.params.sketch, feat.name); openExtrudeDash(feat, existing);
+        closeDash(); Object.assign(feat.params, { side: vals.side, depth: vals.depth, depth2: vals.depth2, through: vals.through, flip: vals.flip, op: vals.op }); feat.params.sketch = sketchParam(feat.params.sketch, vals);
+        if (feat.params.sketch.ref) await editSketchFeature(feat.params.sketch.ref); else { await rebuild(); await editSketch(feat.params.sketch, feat.name); }
+        openExtrudeDash(feat, existing);
       } },
     ],
-    apply: (v, f) => Object.assign(f.params, { side: v.side, depth: v.depth, depth2: v.depth2, through: v.through, flip: v.flip, op: v.op, sketch: { ...f.params.sketch, plane: v.plane } }),
+    apply: (v, f) => Object.assign(f.params, { side: v.side, depth: v.depth, depth2: v.depth2, through: v.through, flip: v.flip, op: v.op, sketch: sketchParam(f.params.sketch, v) }),
   });
 }
 
@@ -938,7 +1013,7 @@ async function featDatumPoint(existing) {
 function editFeature(f) {
   const map = { extrude: () => openExtrudeDash(clone(f), f), revolve: () => openRevolveDash(clone(f), f), hole: () => featHole(f), round: () => featEdge('round', f), chamfer: () => featEdge('chamfer', f),
     pattern: () => featPattern(f), mirror: () => featMirror(f), shell: () => featShell(f), datumPlane: () => featDatumPlane(f), datumAxis: () => featDatumAxis(f), datumPoint: () => featDatumPoint(f),
-    import: () => editImport(f), csys: () => toast('Das Standard-Koordinatensystem ist fest', 'info') };
+    import: () => editImport(f), sketch: () => featSketch(f), csys: () => toast('Das Standard-Koordinatensystem ist fest', 'info') };
   map[f.type]?.();
 }
 function editImport(f) {
@@ -988,7 +1063,7 @@ async function asmCreate() {
   const d = doc(); if (!isAsm(d)) return;
   if (!d.path) { toast('Baugruppe bitte zuerst speichern', 'warn'); return; }
   const n = await promptDialog('Komponente erzeugen', 'Name des neuen Parts', nextDefaultName('part')); if (!n) return;
-  const data = newPart(n.trim()); const path = `${n.trim().toLowerCase()}.bcprt`;
+  const data = newPart(n.trim()); const path = `${n.trim().toLowerCase()}.csprt`;
   if (App.files.some(f => f.path === path)) { toast(`${path} existiert bereits`, 'err'); return; }
   await writeFile(path, JSON.stringify(data)); await refreshFiles();
   await commit((a) => { a.components.push(newComponent(path, n.trim().toUpperCase())); });
@@ -1005,7 +1080,7 @@ async function asmImport() {
       const nm = meshes.length > 1 ? `${base}_${String(i + 1).padStart(2, '0')}` : base;
       const pd = newPart(nm); pd.features.push(importFeature(pd, `Import ${meshes[i].name || nm}`, meshes[i].geom, path));
       if (meshes[i].color) pd.color = `#${new THREE.Color(...meshes[i].color).getHexString()}`;
-      const fp = `${nm}.bcprt`; await writeFile(fp, JSON.stringify(pd)); comps.push(newComponent(fp, (meshes[i].name || nm).toUpperCase().slice(0, 40)));
+      const fp = `${nm}.csprt`; await writeFile(fp, JSON.stringify(pd)); comps.push(newComponent(fp, (meshes[i].name || nm).toUpperCase().slice(0, 40)));
     }
     await refreshFiles();
     await commit((a) => { a.components.push(...comps); });
@@ -1136,9 +1211,9 @@ async function massProps() {
     A += G.surfaceArea(g); g.computeBoundingBox(); bb.union(g.boundingBox);
   }
   C.divideScalar(V || 1); const sz = bb.getSize(new THREE.Vector3());
-  const dens = el('input', { value: localStorage.getItem('browsercad.density') || '7.85', style: 'width:80px' });
+  const dens = el('input', { value: localStorage.getItem('cadstudio.density') || '7.85', style: 'width:80px' });
   const massEl = el('b');
-  const upd = () => { const rho = +dens.value.replace(',', '.') || 0; massEl.textContent = `${fmt(V / 1000 * rho, 3)} g  (${fmt(V / 1e6 * rho, 4)} kg)`; try { localStorage.setItem('browsercad.density', dens.value); } catch { /* egal */ } };
+  const upd = () => { const rho = +dens.value.replace(',', '.') || 0; massEl.textContent = `${fmt(V / 1000 * rho, 3)} g  (${fmt(V / 1e6 * rho, 4)} kg)`; try { localStorage.setItem('cadstudio.density', dens.value); } catch { /* egal */ } };
   dens.oninput = upd; upd();
   const row = (k, v) => el('tr', {}, el('td', {}, k), el('td', {}, v));
   await modal({ title: `Masseeigenschaften – ${d.data.name}`, width: 520, body: el('table', { class: 'props' },
@@ -1209,7 +1284,7 @@ async function spaceMouseDialog() {
     el('div', { class: 'row wrap' }, ...['tx', 'ty', 'tz', 'rx', 'ry', 'rz'].map(k => chk(c.invert, k, k.toUpperCase()))),
     el('div', { class: 'row' }, el('label', {}, 'Taste 1 ', btnSel(1)), el('label', {}, 'Taste 2 ', btnSel(2))),
     el('p', { class: 'muted small' }, sm.native
-      ? 'Das Programm liest die SpaceMouse direkt per USB. Reagiert sie nicht, den 3Dconnexion-Treiber (3DxWare / 3Dconnexion Home) beenden – er kann das Gerät exklusiv belegen. Unter macOS ggf. in Systemeinstellungen › Datenschutz › Eingabeüberwachung BrowserCAD erlauben.'
+      ? 'Das Programm liest die SpaceMouse direkt per USB. Reagiert sie nicht, den 3Dconnexion-Treiber (3DxWare / 3Dconnexion Home) beenden – er kann das Gerät exklusiv belegen. Unter macOS ggf. in Systemeinstellungen › Datenschutz › Eingabeüberwachung CAD-Studio-MK1 erlauben.'
       : 'Im Browser-Modus über WebHID (Chrome/Edge). Falls das Gerät nicht reagiert, den 3Dconnexion-Treiber kurz beenden.')),
   buttons: [{ label: 'Schließen', value: true, primary: true }] });
 }
@@ -1220,7 +1295,7 @@ function smButton(action) {
 
 function helpDialog() {
   const r = (a, b) => el('tr', {}, el('td', {}, a), el('td', {}, b));
-  modal({ title: `Hilfe – BrowserCAD ${App.server.version}`, width: 620, body: el('div', {},
+  modal({ title: `Hilfe – CAD-Studio-MK1 ${App.server.version}`, width: 620, body: el('div', {},
     el('h4', {}, 'Maus (wie Creo)'), el('table', { class: 'props' },
       r('Mittlere Maustaste ziehen', 'Drehen'), r('Shift + Mitte ziehen', 'Verschieben'), r('Strg + Mitte ziehen', 'Zoomen'), r('Mausrad', 'Zoomen an Mausposition'),
       r('Alt + Linke Taste ziehen', 'Drehen (Trackpad/Mac)'), r('Alt + Shift + Linke Taste', 'Verschieben (Trackpad/Mac)'), r('Linksklick', 'Auswählen'), r('Rechtsklick', 'Kontextmenü')),
@@ -1232,14 +1307,15 @@ function helpDialog() {
       ? `NVIDIA usd-brep ${KERNEL.version}: exakte NURBS-B-Rep-Volumenkörper. Rundung und Fase an beliebigen Kanten, Schale, exakte Masseeigenschaften, Export als OpenUSD-B-Rep und SMLib-B-Rep.`
       : `Interner Netzkern (usd-brep ist auf diesem System nicht verfügbar – NVIDIA bietet es nur für Windows und Linux an). Rundung/Fase nur an geraden Kanten, keine Schale. ${App.server?.kernel?.error || ''}`),
     el('h4', {}, 'Arbeitsweise'),
+    el('p', {}, 'Eigenständige Skizze: Ebene oder ebene Fläche wählen → Modell › Skizze → zeichnen → OK. Die neue Skizze ist danach ausgewählt; Extrudieren oder Drehen verwendet sie direkt. Eine Skizze lässt sich auch im Grafikbereich anklicken oder im Dashboard unter „Skizze“ wählen und von mehreren Features nutzen. Verwendete Skizzen werden ausgeblendet (Rechtsklick › Einblenden).'),
     el('p', {}, 'Wie in Creo: Ebene oder Fläche wählen → Extrudieren/Drehen → Skizze zeichnen → ✔ → Tiefe im Dashboard einstellen → ✔. Doppelklick im Modellbaum öffnet die Definition. „Hier einfügen“ im Kontextmenü setzt die Einfügemarke.')),
   buttons: [{ label: 'Schließen', value: true, primary: true }] });
 }
 
 async function massDialog(d, p) {
-  const dens = el('input', { value: localStorage.getItem('browsercad.density') || '7.85', style: 'width:80px' });
+  const dens = el('input', { value: localStorage.getItem('cadstudio.density') || '7.85', style: 'width:80px' });
   const massEl = el('b');
-  const upd = () => { const rho = +dens.value.replace(',', '.') || 0; massEl.textContent = `${fmt(p.volume / 1000 * rho, 3)} g  (${fmt(p.volume / 1e6 * rho, 4)} kg)`; try { localStorage.setItem('browsercad.density', dens.value); } catch { /* egal */ } };
+  const upd = () => { const rho = +dens.value.replace(',', '.') || 0; massEl.textContent = `${fmt(p.volume / 1000 * rho, 3)} g  (${fmt(p.volume / 1e6 * rho, 4)} kg)`; try { localStorage.setItem('cadstudio.density', dens.value); } catch { /* egal */ } };
   dens.oninput = upd; upd();
   const bb = d.res.bbox.getSize(new THREE.Vector3()); const c = p.centroid || [0, 0, 0];
   const row = (k, v) => el('tr', {}, el('td', {}, k), el('td', {}, v));
@@ -1258,7 +1334,7 @@ async function exitApp() {
   syncDirty(); App.sm?.es?.close();
   try { await api('/api/shutdown', { method: 'POST' }); } catch { /* Server weg */ }
   if (App.desktop) return; // Programmfenster wird vom Programm geschlossen
-  document.body.replaceChildren(el('div', { class: 'bye' }, el('h2', {}, 'BrowserCAD wurde beendet'), el('p', {}, 'Dieses Fenster kann geschlossen werden.')));
+  document.body.replaceChildren(el('div', { class: 'bye' }, el('h2', {}, 'CAD-Studio-MK1 wurde beendet'), el('p', {}, 'Dieses Fenster kann geschlossen werden.')));
   setTimeout(() => window.close(), 400);
 }
 
@@ -1288,7 +1364,7 @@ function dataURLtoBlob(u) { const [h, b] = u.split(','); const bin = atob(b); co
 const CMD = {
   new: () => newDoc('part'), open: () => openFile(), save: () => saveDoc(), saveAs: () => saveAs(), export: () => exportDialog(), close: () => closeDoc(), exit: () => exitApp(),
   workdir: () => workdirDialog(false), undo: () => undo(), redo: () => redo(), regen: async () => { App.partCache.clear(); await rebuild(); }, import: () => (isAsm() ? asmImport() : importIntoPart()),
-  datumPlane: () => featDatumPlane(), datumAxis: () => featDatumAxis(), datumPoint: () => featDatumPoint(),
+  datumPlane: () => featDatumPlane(), datumAxis: () => featDatumAxis(), datumPoint: () => featDatumPoint(), sketch: () => featSketch(),
   extrude: () => featExtrude(), revolve: () => featRevolve(), hole: () => featHole(), round: () => featEdge('round'), chamfer: () => featEdge('chamfer'),
   pattern: () => featPattern(), mirror: () => featMirror(), shell: () => featShell(),
   measure: () => measureDistance(), clearMeasure: () => clearMeasure(), mass: () => massProps(),
@@ -1330,7 +1406,7 @@ function ribbonSpec() {
     ] : [
       { label: 'Operationen', items: [{ id: 'regen', label: 'Regenerieren', icon: 'regen', big: true }] },
       { label: 'Daten holen', items: [{ id: 'import', label: 'Importieren', icon: 'import', big: true }] },
-      { label: 'Bezug', items: [{ id: 'datumPlane', label: 'Ebene', icon: 'plane', big: true }, { id: 'datumAxis', label: 'Achse', icon: 'axis' }, { id: 'datumPoint', label: 'Punkt', icon: 'point' }] },
+      { label: 'Bezug', items: [{ id: 'datumPlane', label: 'Ebene', icon: 'plane', big: true }, { id: 'sketch', label: 'Skizze', icon: 'sketch', big: true }, { id: 'datumAxis', label: 'Achse', icon: 'axis' }, { id: 'datumPoint', label: 'Punkt', icon: 'point' }] },
       { label: 'Formen', items: [{ id: 'extrude', label: 'Extrudieren', icon: 'extrude', big: true }, { id: 'revolve', label: 'Drehen', icon: 'revolve', big: true }] },
       { label: 'Konstruktion', items: [{ id: 'hole', label: 'Bohrung', icon: 'hole', big: true }, { id: 'round', label: 'Rundung', icon: 'round', big: true }, { id: 'chamfer', label: 'Fase', icon: 'chamfer', big: true }, { id: 'shell', label: 'Schale', icon: 'shell', big: true }] },
       { label: 'Editieren', items: [{ id: 'pattern', label: 'Muster', icon: 'pattern', big: true }, { id: 'mirror', label: 'Spiegeln', icon: 'mirror', big: true }] },
@@ -1343,7 +1419,7 @@ function ribbonSpec() {
       { label: 'Ausrichtung', items: [{ id: 'fit', label: 'Einpassen', icon: 'fit', big: true }, { id: 'standard', label: 'Standard', icon: 'view', big: true },
         ...['FRONT', 'BACK', 'TOP', 'BOTTOM', 'LEFT', 'RIGHT'].map(v => ({ id: `view:${v}`, label: v, icon: 'view' }))] },
       { label: 'Modelldarstellung', items: [['shadedEdges', 'Schattiert mit Kanten'], ['shaded', 'Schattiert'], ['hidden', 'Keine verdeckten'], ['wire', 'Drahtmodell']].map(([s, l]) => ({ id: `style:${s}`, label: l, icon: 'style', active: App.display.style === s })) },
-      { label: 'Anzeigen', items: [['planes', 'Ebenen'], ['axes', 'Achsen'], ['points', 'Punkte'], ['csys', 'Koord.-Systeme'], ['tags', 'Beschriftungen']].map(([k, l]) => ({ id: `dtm:${k}`, label: l, icon: { planes: 'plane', axes: 'axis', points: 'point', csys: 'csys', tags: 'datums' }[k], active: App.display[k] })) },
+      { label: 'Anzeigen', items: [['planes', 'Ebenen'], ['axes', 'Achsen'], ['points', 'Punkte'], ['csys', 'Koord.-Systeme'], ['sketches', 'Skizzen'], ['tags', 'Beschriftungen']].map(([k, l]) => ({ id: `dtm:${k}`, label: l, icon: { planes: 'plane', axes: 'axis', points: 'point', csys: 'csys', sketches: 'sketch', tags: 'datums' }[k], active: App.display[k] })) },
       { label: 'Darstellung', items: [{ id: 'color', label: 'Farbe', icon: 'color', big: true }, { id: 'screenshot', label: 'Bild (PNG)', icon: 'camera', big: true }] },
     ],
     tools: [
@@ -1392,7 +1468,7 @@ function buildIGT() {
     b('fit', 'fit', 'Neu einpassen'), b('zoomin', 'zoomin', 'Vergrößern'), b('zoomout', 'zoomout', 'Verkleinern'), b('repaint', 'refresh', 'Neu zeichnen (Strg+R)'),
     dd('view', 'Gespeicherte Ausrichtungen', Object.entries(VIEWS).map(([k, v]) => ({ label: v.label, action: () => runCmd(k === 'standard' ? 'standard' : `view:${k}`) }))),
     dd('style', 'Darstellungsstil', [['shadedEdges', 'Schattiert mit Kanten'], ['shaded', 'Schattiert'], ['hidden', 'Keine verdeckten Kanten'], ['wire', 'Drahtmodell']].map(([s, l]) => ({ label: (App.display.style === s ? '● ' : '○ ') + l, action: () => runCmd(`style:${s}`) }))),
-    dd('datums', 'Bezugsanzeige-Filter', [['planes', 'Ebenen'], ['axes', 'Achsen'], ['points', 'Punkte'], ['csys', 'Koordinatensysteme'], ['tags', 'Bezugsbeschriftungen']].map(([k, l]) => ({ label: `${App.display[k] ? '☑' : '☐'} ${l}`, action: () => runCmd(`dtm:${k}`) }))),
+    dd('datums', 'Bezugsanzeige-Filter', [['planes', 'Ebenen'], ['axes', 'Achsen'], ['points', 'Punkte'], ['csys', 'Koordinatensysteme'], ['sketches', 'Skizzen'], ['tags', 'Bezugsbeschriftungen']].map(([k, l]) => ({ label: `${App.display[k] ? '☑' : '☐'} ${l}`, action: () => runCmd(`dtm:${k}`) }))),
     b('spin', 'spin', 'Drehzentrum anzeigen', App.display.spin),
     el('span', { class: 'igsep' }),
     b('measure', 'measure', 'Messen'),
@@ -1420,14 +1496,14 @@ function highlightTree(id) {
 function partTree(d) {
   const data = d.data; const res = d.res;
   const ins = data.insertAt === null || data.insertAt === undefined ? data.features.length : data.insertAt;
-  const rows = [el('div', { class: 'trow root' }, icon('part'), el('span', {}, `${data.name.toUpperCase()}.BCPRT`))];
+  const rows = [el('div', { class: 'trow root' }, icon('part'), el('span', {}, `${data.name.toUpperCase()}.CSPRT`))];
   const marker = () => el('div', { class: 'trow insert', title: 'Einfügemarke – neue Features werden hier eingefügt',
     oncontextmenu: (e) => { e.preventDefault(); contextMenu(e.clientX, e.clientY, [{ label: 'Ans Ende verschieben', action: () => setInsert(data.features.length) }]); } }, icon('insert'), el('span', {}, 'Hier einfügen'));
   data.features.forEach((f, i) => {
     if (i === ins) rows.push(marker());
     const st = res?.status.get(f.id) || 'ok';
     const err = res?.errors.find(e => e.id === f.id);
-    const hidden = f.hidden || hiddenByLayer(data, f);
+    const hidden = f.type === 'sketch' ? !sketchVisible(f) : (f.hidden || hiddenByLayer(data, f));
     const row = el('div', { class: `trow st-${st} ${hidden ? 'hid' : ''} ${App.treeSel === f.id ? 'sel' : ''}`, 'data-id': f.id, title: err ? err.msg : `${FEATURE_INFO[f.type]?.label}${hidden ? ' (ausgeblendet)' : ''}`,
       onclick: () => selectFeature(f), ondblclick: () => editFeature(f),
       oncontextmenu: (e) => { e.preventDefault(); selectFeature(f); featureMenu(e, f, i); } },
@@ -1444,15 +1520,27 @@ function selectFeature(f) {
   if (tools) for (const t of tools) App.selHl.add(highlightMesh(t.geom, t.op === 'cut' ? 0xff6b6b : 0x29c8ff, 0.22));
   d.group.traverse(o => { if (o.userData.datumId === f.id) { const c = o.clone(); c.traverse(x => { if (x.material) { x.material = x.material.clone(); x.material.color?.set(0xffb020); if (x.type === 'Mesh') x.material.opacity = 0.08; x.material.depthTest = false; x.renderOrder = 25; } }); App.selHl.add(c); } });
   if (f.type === 'datumPlane') App.sel = [{ kind: 'plane', ref: f.id, name: f.name }];
+  if (f.type === 'sketch') App.sel = [{ kind: 'sketch', ref: f.id, name: f.name }];
   App.viewer.request();
+}
+/** Skizzen-Features: von Features verwendete Skizzen sind ausgeblendet, solange nicht ausdruecklich eingeblendet (wie Creo) */
+function sketchVisible(f) {
+  const res = doc()?.res; if (f.hidden || hiddenByLayer(doc().data, f)) return false;
+  return !(res?.usedSketches?.has(f.id)) || !!f.show;
 }
 function featureMenu(e, f, i) {
   const d = doc(); const isDatum = ['datumPlane', 'datumAxis', 'datumPoint', 'csys'].includes(f.type);
+  const isSketch = f.type === 'sketch'; const skVisible = isSketch && sketchVisible(f);
   contextMenu(e.clientX, e.clientY, [
-    { label: 'Definition editieren', icon: 'sketch', action: () => editFeature(f), disabled: f.type === 'csys' },
-    ['extrude', 'revolve'].includes(f.type) ? { label: 'Skizze bearbeiten', icon: 'sketch', action: async () => { const ff = clone(f); if (await editSketch(ff.params.sketch, ff.name)) await commit((data) => { data.features[data.features.findIndex(x => x.id === f.id)] = ff; }); else rebuild(); } } : null,
+    { label: isSketch ? 'Skizze bearbeiten' : 'Definition editieren', icon: 'sketch', action: () => editFeature(f), disabled: f.type === 'csys' },
+    isSketch ? { label: 'Extrudieren mit dieser Skizze', icon: 'extrude', action: () => { App.sel = [{ kind: 'sketch', ref: f.id, name: f.name }]; featExtrude(); } } : null,
+    isSketch ? { label: 'Drehen mit dieser Skizze', icon: 'revolve', action: () => { App.sel = [{ kind: 'sketch', ref: f.id, name: f.name }]; featRevolve(); } } : null,
+    ['extrude', 'revolve'].includes(f.type) ? { label: f.params.sketch?.ref ? 'Verwendete Skizze bearbeiten' : 'Skizze bearbeiten', icon: 'sketch', action: async () => {
+      if (f.params.sketch?.ref) { await editSketchFeature(f.params.sketch.ref); return; }
+      const ff = clone(f); if (await editSketch(ff.params.sketch, ff.name)) await commit((data) => { data.features[data.features.findIndex(x => x.id === f.id)] = ff; }); else rebuild(); } } : null,
     { label: 'Umbenennen', icon: 'params', action: () => renameFeature(f) },
     isDatum ? { label: f.hidden ? 'Einblenden' : 'Ausblenden', icon: f.hidden ? 'eye' : 'eyeoff', action: () => toggleFlag(f, 'hidden') } : null,
+    isSketch ? { label: skVisible ? 'Ausblenden' : 'Einblenden', icon: skVisible ? 'eyeoff' : 'eye', action: () => commit((data) => { const x = data.features.find(y => y.id === f.id); x.hidden = skVisible; x.show = !skVisible; }) } : null,
     { label: f.suppressed ? 'Fortsetzen' : 'Unterdrücken', icon: 'eyeoff', action: () => toggleFlag(f, 'suppressed') },
     { label: 'Hier einfügen (nach diesem Feature)', icon: 'insert', action: () => setInsert(i + 1) },
     (f.type === 'extrude' || f.type === 'revolve' || f.type === 'hole' || f.type === 'round' || f.type === 'chamfer') ? { label: 'Mustern…', icon: 'pattern', action: () => { App.treeSel = f.id; featPattern(); } } : null,
@@ -1461,7 +1549,7 @@ function featureMenu(e, f, i) {
 }
 function asmTree(d) {
   const data = d.data; const res = d.res;
-  const rows = [el('div', { class: 'trow root' }, icon('assembly'), el('span', {}, `${data.name.toUpperCase()}.BCASM`))];
+  const rows = [el('div', { class: 'trow root' }, icon('assembly'), el('span', {}, `${data.name.toUpperCase()}.CSASM`))];
   for (const id of Object.keys(ASM_DATUMS)) rows.push(el('div', { class: 'trow', 'data-id': id }, icon('plane'), el('span', { class: 'tn' }, id)));
   rows.push(el('div', { class: 'trow' }, icon('csys'), el('span', { class: 'tn' }, 'ASM_DEF_CSYS')));
   for (const c of data.components) {
@@ -1498,7 +1586,7 @@ function layerTree(d) {
   const data = d.data; const names = new Map((data.features || []).map(f => [f.id, f.name]));
   for (const c of data.components || []) names.set(c.id, c.name);
   const rows = data.layers.map((l, li) => {
-    const ruleTxt = l.rule ? `Regel: ${({ datumPlane: 'alle Bezugsebenen', datumAxis: 'alle Achsen', datumPoint: 'alle Punkte', csys: 'alle Koordinatensysteme', default: 'Standard-Ebenen' })[l.rule]}` : `${l.items.length} Element(e)`;
+    const ruleTxt = l.rule ? `Regel: ${({ datumPlane: 'alle Bezugsebenen', datumAxis: 'alle Achsen', datumPoint: 'alle Punkte', csys: 'alle Koordinatensysteme', sketch: 'alle Skizzen', default: 'Standard-Ebenen' })[l.rule]}` : `${l.items.length} Element(e)`;
     const members = l.rule ? 'auto' : String(l.items.length);
     return el('div', { class: 'layer' },
       el('div', { class: `trow ${l.visible ? '' : 'hid'}`, title: `${l.name} – ${ruleTxt}`, oncontextmenu: (e) => { e.preventDefault(); layerMenu(e, li); } },
@@ -1535,6 +1623,7 @@ function folderTree() {
   icon(fileIcon(f.kind)), el('span', { class: 'tn' }, f.path), el('span', { class: 'tc' }, KIND_LABEL[f.kind])));
   return el('div', { class: 'tree' },
     el('div', { class: 'row pad' }, el('button', { class: 'btn sm', onclick: () => refreshFiles() }, icon('refresh'), 'Aktualisieren'), el('button', { class: 'btn sm', onclick: () => workdirDialog(false) }, icon('workdir'), 'Wechseln'),
+      App.files.some(f => f.legacy) ? el('button', { class: 'btn sm', title: 'Dateien im alten Format umwandeln', onclick: () => offerLegacyMigration(true) }, icon('refresh'), 'Alte umwandeln') : null,
       el('button', { class: 'btn sm', title: 'Arbeitsverzeichnis im Explorer/Finder öffnen', onclick: () => apiJson('/api/reveal', {}).catch(e => toast(e.message, 'err')) }, icon('folder'), 'Öffnen')),
     el('div', { class: 'muted small pad path' }, App.server?.workdir || ''),
     rows.length ? rows : el('div', { class: 'muted pad small' }, 'Keine CAD-Dateien im Arbeitsverzeichnis.'));

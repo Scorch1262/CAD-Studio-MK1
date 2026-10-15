@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
-# PyInstaller-Spezifikation fuer BrowserCAD (eigenes Programmfenster, keine Konsole)
-#   Windows: dist/BrowserCAD.exe   (eine Datei)
-#   macOS:   dist/BrowserCAD.app
+# PyInstaller-Spezifikation fuer CAD-Studio-MK1 (eigenes Programmfenster, keine Konsole)
+#   Windows: dist/CAD-Studio-MK1.exe   (eine Datei)
+#   macOS:   dist/CAD-Studio-MK1.app
 import sys
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules, copy_metadata
@@ -36,9 +36,9 @@ if _spec and _spec.origin:
     except Exception:
         pass
     hidden += ['importlib.util', 'importlib.metadata', 'types']
-    print('BrowserCAD.spec: usd-brep wird eingebunden aus', _pkg)
+    print('CAD-Studio-MK1.spec: usd-brep wird eingebunden aus', _pkg)
 else:
-    print('BrowserCAD.spec: usd-brep nicht installiert - interner Kern')
+    print('CAD-Studio-MK1.spec: usd-brep nicht installiert - interner Kern')
 if sys.platform == 'win32':
     hidden += ['clr', 'clr_loader']               # pythonnet fuer WebView2
     # Microsoft-C++-Laufzeit app-lokal neben die usd-brep-DLLs legen (kein VC++ Redistributable noetig)
@@ -56,7 +56,7 @@ elif sys.platform == 'darwin':
 excludes = ['tkinter', 'numpy', 'matplotlib', 'PIL', 'PyQt5', 'PyQt6', 'PySide2', 'PySide6', 'qtpy', 'gi'] + excludes_extra
 
 a = Analysis(
-    ['browsercad.py'],
+    ['cadstudio.py'],
     pathex=[],
     binaries=binaries,
     datas=datas,
@@ -72,20 +72,20 @@ if sys.platform == 'darwin':
     exe = EXE(
         pyz, a.scripts, [],
         exclude_binaries=True,
-        name='BrowserCAD',
+        name='CAD-Studio-MK1',
         debug=False, strip=False, upx=False,
         console=False,
         argv_emulation=False,
     )
-    coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name='BrowserCAD')
+    coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name='CAD-Studio-MK1')
     app = BUNDLE(
         coll,
-        name='BrowserCAD.app',
-        bundle_identifier='de.scorch1262.browsercad',
+        name='CAD-Studio-MK1.app',
+        bundle_identifier='de.scorch1262.cad-studio-mk1',
         version=VERSION,
         info_plist={
-            'CFBundleName': 'BrowserCAD',
-            'CFBundleDisplayName': 'BrowserCAD',
+            'CFBundleName': 'CAD-Studio-MK1',
+            'CFBundleDisplayName': 'CAD-Studio-MK1',
             'CFBundleShortVersionString': VERSION,
             'CFBundleVersion': VERSION,
             'NSHighResolutionCapable': True,
@@ -97,7 +97,7 @@ if sys.platform == 'darwin':
 else:
     exe = EXE(
         pyz, a.scripts, a.binaries, a.datas, [],
-        name='BrowserCAD',
+        name='CAD-Studio-MK1',
         debug=False, strip=False, upx=False,
         console=False,
         runtime_tmpdir=None,

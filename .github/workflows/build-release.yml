@@ -49,10 +49,10 @@ jobs:
       - name: Kurztest (interner Server startet, Oberflaeche wird ausgeliefert)
         shell: bash
         env:
-          BROWSERCAD_MODE: server
-          BROWSERCAD_PORT: '8877'
+          CADSTUDIO_MODE: server
+          CADSTUDIO_PORT: '8877'
         run: |
-          python browsercad.py &
+          python cadstudio.py &
           PID=$!
           for i in $(seq 1 30); do
             if curl -sf http://127.0.0.1:8877/api/state > /dev/null; then break; fi
@@ -65,20 +65,20 @@ jobs:
           curl -sf -X POST http://127.0.0.1:8877/api/shutdown || kill $PID || true
 
       - name: PyInstaller
-        run: pyinstaller --noconfirm --clean BrowserCAD.spec
+        run: pyinstaller --noconfirm --clean CAD-Studio-MK1.spec
 
       - name: Selbsttest der fertigen exe (Kern usd-brep im Paket)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $env:BROWSERCAD_PORT = '8878'
-          $p = Start-Process -FilePath dist/BrowserCAD.exe -ArgumentList '--server' -PassThru
+          $env:CADSTUDIO_PORT = '8878'
+          $p = Start-Process -FilePath dist/CAD-Studio-MK1.exe -ArgumentList '--server' -PassThru
           $up = $false
           for ($i = 0; $i -lt 60; $i++) {
             try { Invoke-RestMethod http://127.0.0.1:8878/api/state -TimeoutSec 5 | Out-Null; $up = $true; break } catch { Start-Sleep -Seconds 2 }
           }
           if (-not $up) {
-            Get-Content "$env:USERPROFILE\.browsercad\browsercad.log" -ErrorAction SilentlyContinue
+            Get-Content "$env:USERPROFILE\.cad-studio-mk1\cad-studio-mk1.log" -ErrorAction SilentlyContinue
             Stop-Process $p -Force -ErrorAction SilentlyContinue
             throw 'Die exe startet nicht'
           }
@@ -87,7 +87,7 @@ jobs:
           try { Invoke-RestMethod -Method Post http://127.0.0.1:8878/api/shutdown | Out-Null } catch {}
           $r = $resp.Content | ConvertFrom-Json
           if (-not $r.ok -or -not $r.kernel.available) {
-            Get-Content "$env:USERPROFILE\.browsercad\browsercad.log" -ErrorAction SilentlyContinue
+            Get-Content "$env:USERPROFILE\.cad-studio-mk1\cad-studio-mk1.log" -ErrorAction SilentlyContinue
             throw 'usd-brep-Kern in der exe nicht funktionsfaehig'
           }
 
@@ -95,7 +95,7 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          BROWSERCAD_PORT=8878 dist/BrowserCAD.app/Contents/MacOS/BrowserCAD --server &
+          CADSTUDIO_PORT=8878 dist/CAD-Studio-MK1.app/Contents/MacOS/CAD-Studio-MK1 --server &
           for i in $(seq 1 30); do curl -sf http://127.0.0.1:8878/api/state > /dev/null && break; sleep 2; done
           curl -sf http://127.0.0.1:8878/api/kernel/info
           curl -sf -X POST http://127.0.0.1:8878/api/shutdown || true
@@ -106,7 +106,7 @@ jobs:
         run: |
           $v = (Get-Content VERSION -Raw).Trim()
           New-Item -ItemType Directory -Force -Path out | Out-Null
-          Copy-Item dist/BrowserCAD.exe "out/BrowserCAD-$v-windows-x64.exe"
+          Copy-Item dist/CAD-Studio-MK1.exe "out/CAD-Studio-MK1-$v-windows-x64.exe"
 
       - name: Paket macOS
         if: runner.os == 'macOS'
@@ -115,12 +115,12 @@ jobs:
           arch=$(uname -m)
           mkdir -p out
           # ad-hoc signieren, damit die App auf Apple Silicon startet
-          codesign --force --deep --sign - dist/BrowserCAD.app || true
-          ditto -c -k --sequesterRsrc --keepParent dist/BrowserCAD.app "out/BrowserCAD-$v-macos-$arch.zip"
+          codesign --force --deep --sign - dist/CAD-Studio-MK1.app || true
+          ditto -c -k --sequesterRsrc --keepParent dist/CAD-Studio-MK1.app "out/CAD-Studio-MK1-$v-macos-$arch.zip"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: BrowserCAD-${{ matrix.label }}
+          name: CAD-Studio-MK1-${{ matrix.label }}
           path: out/*
           if-no-files-found: error
 
@@ -150,12 +150,12 @@ jobs:
       - name: Release-Text
         run: |
           {
-            echo "BrowserCAD ${{ steps.ver.outputs.version }} (Build ${{ github.run_number }})"
+            echo "CAD-Studio-MK1 ${{ steps.ver.outputs.version }} (Build ${{ github.run_number }})"
             echo
-            echo "- Windows 10/11: BrowserCAD-*-windows-x64.exe starten (benoetigt die WebView2-Laufzeit, auf Windows 11 vorinstalliert)"
-            echo "- macOS 12 oder neuer: ZIP entpacken, BrowserCAD.app beim ersten Mal per Rechtsklick > Oeffnen starten (nicht notarisiert)"
+            echo "- Windows 10/11: CAD-Studio-MK1-*-windows-x64.exe starten (benoetigt die WebView2-Laufzeit, auf Windows 11 vorinstalliert)"
+            echo "- macOS 12 oder neuer: ZIP entpacken, CAD-Studio-MK1.app beim ersten Mal per Rechtsklick > Oeffnen starten (nicht notarisiert)"
             echo
-            echo "BrowserCAD laeuft als eigenes Programmfenster, kein Browser noetig. Die SpaceMouse wird direkt per USB erkannt."
+            echo "CAD-Studio-MK1 laeuft als eigenes Programmfenster, kein Browser noetig. Die SpaceMouse wird direkt per USB erkannt."
             echo "Modellierkern: NVIDIA usd-brep (exakte NURBS-B-Rep) in der Windows-exe. macOS: interner Kern, da usd-brep fuer macOS nicht angeboten wird."
             echo
             awk '/^## /{n++} n==1' CHANGELOG.md
@@ -164,7 +164,7 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
-          name: BrowserCAD ${{ steps.ver.outputs.version }} (Build ${{ github.run_number }})
+          name: CAD-Studio-MK1 ${{ steps.ver.outputs.version }} (Build ${{ github.run_number }})
           body_path: release_notes.md
           files: dist/*
           make_latest: true

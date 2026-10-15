@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-BrowserCAD - CAD-Programm im Stil von PTC Creo Parametric.
+CAD-Studio-MK1 - CAD-Programm im Stil von PTC Creo Parametric.
 
 Laeuft als eigenstaendiges Desktop-Programm mit eigenem Fenster
 (Windows: WebView2, macOS: WKWebView ueber pywebview). Intern arbeitet ein
@@ -9,7 +9,7 @@ Die 3Dconnexion SpaceMouse wird direkt per USB-HID (hidapi) gelesen.
 
 Startmodi:  (Standard) eigenes Fenster
             --browser   Oberflaeche im Standardbrowser
-            --server    nur Server (Tests/CI), auch BROWSERCAD_MODE=server
+            --server    nur Server (Tests/CI), auch CADSTUDIO_MODE=server
 
 Alle Dateien (Parts, Baugruppen, Importe, Exporte) liegen im Arbeitsverzeichnis,
 das beim Start festgelegt wird.
@@ -34,11 +34,11 @@ import webbrowser
 from pathlib import Path
 
 # --- Fensterprogramm ohne Konsole: Ausgaben in eine Logdatei umleiten ---
-_LOG_DIR = Path.home() / ".browsercad"
+_LOG_DIR = Path.home() / ".cad-studio-mk1"
 if sys.stdout is None or sys.stderr is None or getattr(sys, "frozen", False):
     try:
         _LOG_DIR.mkdir(parents=True, exist_ok=True)
-        _log = open(_LOG_DIR / "browsercad.log", "w", encoding="utf-8", buffering=1)
+        _log = open(_LOG_DIR / "cad-studio-mk1.log", "w", encoding="utf-8", buffering=1)
         sys.stdout = _log
         sys.stderr = _log
     except OSError:
@@ -68,8 +68,8 @@ try:
 except OSError:
     VERSION = "0.0.0"
 
-APP_ID = "BrowserCAD"
-CONFIG_DIR = Path.home() / ".browsercad"
+APP_ID = "CAD-Studio-MK1"
+CONFIG_DIR = Path.home() / ".cad-studio-mk1"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 DEFAULT_PORT = 8765
 
@@ -87,6 +87,10 @@ DEFAULT_CONFIG = {
 }
 
 CREO_EXT = (".prt", ".asm")
+# Dateien aus Vorgaengerversionen (werden gelesen und koennen umgewandelt werden)
+LEGACY_EXT = {".bcprt": ("part", ".csprt"), ".bcasm": ("assembly", ".csasm")}
+LEGACY_FORMAT = {"browsercad-part": "cadstudio-part", "browsercad-assembly": "cadstudio-assembly"}
+LEGACY_CONFIG = Path.home() / ".browsercad" / "config.json"
 SW_EXT = (".sldprt", ".sldasm")
 
 _lock = threading.Lock()
@@ -95,6 +99,13 @@ _lock = threading.Lock()
 # ---------------------------------------------------------------- Konfiguration
 def load_config() -> dict:
     cfg = json.loads(json.dumps(DEFAULT_CONFIG))
+    # Einstellungen der Vorgaengerversion einmalig uebernehmen
+    if not CONFIG_FILE.exists() and LEGACY_CONFIG.is_file():
+        try:
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(LEGACY_CONFIG, CONFIG_FILE)
+        except OSError:
+            pass
     try:
         data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
         for k, v in data.items():
@@ -144,9 +155,12 @@ def file_kind(name: str) -> str:
     parts = n.rsplit(".", 1)
     if len(parts) == 2 and parts[1].isdigit():
         n = parts[0]
-    if n.endswith(".bcprt"):
+    for ext, (kind, _new) in LEGACY_EXT.items():
+        if n.endswith(ext):
+            return kind
+    if n.endswith(".csprt"):
         return "part"
-    if n.endswith(".bcasm"):
+    if n.endswith(".csasm"):
         return "assembly"
     if n.endswith((".stp", ".step")):
         return "step"
@@ -286,6 +300,8 @@ def api_files():
                     path=fp.relative_to(wd).as_posix(),
                     name=f,
                     kind=kind,
+                    # alte Datei, zu der es noch keine umgewandelte Fassung gibt
+                    legacy=fp.suffix.lower() in LEGACY_EXT and not fp.with_name(fp.stem + LEGACY_EXT[fp.suffix.lower()][1]).exists(),
                     size=st.st_size,
                     mtime=st.st_mtime,
                 )
@@ -309,7 +325,7 @@ def api_file_put():
     p.parent.mkdir(parents=True, exist_ok=True)
     data = request.get_data()
     # Sicherung der Vorversion (wie Creo-Versionen, aber nur eine Stufe)
-    if p.exists() and request.args.get("backup", "1") == "1" and p.suffix.lower() in (".bcprt", ".bcasm"):
+    if p.exists() and request.args.get("backup", "1") == "1" and p.suffix.lower() in (".csprt", ".csasm"):
         try:
             shutil.copy2(p, p.with_name(p.name + ".bak"))
         except OSError:
@@ -380,6 +396,41 @@ def api_convert():
             stderr=res.stderr[-2000:],
         ), 500
     return jsonify(ok=True, path=out.relative_to(workdir()).as_posix())
+
+
+@app.post("/api/migrate_legacy")
+def api_migrate_legacy():
+    """Alle Dateien der Vorgaengerversion im Arbeitsverzeichnis in das aktuelle Format umwandeln.
+    Die Originale bleiben unveraendert; Verweise in Baugruppen werden angepasst."""
+    wd = workdir()
+    if wd is None:
+        return jsonify(ok=False, error="Kein Arbeitsverzeichnis"), 409
+
+    def new_name(rel):
+        for ext, (_k, new) in LEGACY_EXT.items():
+            if rel.lower().endswith(ext):
+                return rel[: -len(ext)] + new
+        return rel
+
+    done, skipped, errors = [], [], []
+    for p in sorted(wd.rglob("*")):
+        if not p.is_file() or p.suffix.lower() not in LEGACY_EXT or any(x.startswith(".") for x in p.relative_to(wd).parts):
+            continue
+        target = p.with_name(p.stem + LEGACY_EXT[p.suffix.lower()][1])
+        if target.exists():
+            skipped.append(target.relative_to(wd).as_posix())
+            continue
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            data["format"] = LEGACY_FORMAT.get(data.get("format"), data.get("format"))
+            for c in data.get("components", []) or []:
+                if isinstance(c.get("file"), str):
+                    c["file"] = new_name(c["file"])
+            target.write_text(json.dumps(data), encoding="utf-8")
+            done.append(target.relative_to(wd).as_posix())
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{p.name}: {e}")
+    return jsonify(ok=True, converted=done, skipped=skipped, errors=errors)
 
 
 @app.post("/api/config")
@@ -520,7 +571,7 @@ class DesktopApi:
         import webview
         r = WINDOW.create_file_dialog(
             webview.FileDialog.OPEN, directory=str(workdir() or Path.home()), allow_multiple=True,
-            file_types=("CAD-Dateien (*.stp;*.step;*.igs;*.iges;*.stl;*.prt;*.asm;*.sldprt;*.sldasm;*.bcprt;*.bcasm)",
+            file_types=("CAD-Dateien (*.stp;*.step;*.igs;*.iges;*.stl;*.prt;*.asm;*.sldprt;*.sldasm;*.csprt;*.csasm)",
                         "Alle Dateien (*.*)"))
         return list(r) if r else []
 
@@ -687,9 +738,9 @@ def running_instance(port: int) -> bool:
 
 def choose_mode() -> str:
     args = {a.lower() for a in sys.argv[1:]}
-    if "--server" in args or os.environ.get("BROWSERCAD_NO_BROWSER"):
+    if "--server" in args or os.environ.get("CADSTUDIO_NO_BROWSER"):
         return "server"
-    env = (os.environ.get("BROWSERCAD_MODE") or "").lower()
+    env = (os.environ.get("CADSTUDIO_MODE") or "").lower()
     if env in ("desktop", "browser", "server"):
         return env
     if "--browser" in args:
@@ -707,7 +758,7 @@ def run_desktop(url: str) -> bool:
         return False
 
     WINDOW = webview.create_window(
-        f"BrowserCAD {VERSION}", url, js_api=DesktopApi(),
+        f"CAD-Studio-MK1 {VERSION}", url, js_api=DesktopApi(),
         width=1440, height=900, min_size=(1024, 640), maximized=True,
         background_color="#0b1016", text_select=False, zoomable=False,
     )
@@ -717,14 +768,14 @@ def run_desktop(url: str) -> bool:
         if STATE["exiting"] or not STATE["dirty"]:
             return True
         # Ungespeicherte Aenderungen: Abfrage in der Oberflaeche, Schliessen erst nach Bestaetigung
-        threading.Thread(target=lambda: WINDOW.evaluate_js("window.BrowserCAD && BrowserCAD.requestExit()"), daemon=True).start()
+        threading.Thread(target=lambda: WINDOW.evaluate_js("window.CADStudio && CADStudio.requestExit()"), daemon=True).start()
         return False
 
     WINDOW.events.closing += on_closing
     storage = CONFIG_DIR / "webview"
     storage.mkdir(parents=True, exist_ok=True)
     try:
-        webview.start(private_mode=False, storage_path=str(storage), debug=bool(os.environ.get("BROWSERCAD_DEBUG")))
+        webview.start(private_mode=False, storage_path=str(storage), debug=bool(os.environ.get("CADSTUDIO_DEBUG")))
     except Exception as e:  # noqa: BLE001
         print(f"Programmfenster konnte nicht geoeffnet werden ({e}) - verwende Browser.")
         WINDOW = None
@@ -735,9 +786,9 @@ def run_desktop(url: str) -> bool:
 def main() -> None:
     global RUN_MODE
     RUN_MODE = choose_mode()
-    port = int(os.environ.get("BROWSERCAD_PORT") or CFG.get("port") or DEFAULT_PORT)
+    port = int(os.environ.get("CADSTUDIO_PORT") or CFG.get("port") or DEFAULT_PORT)
     if running_instance(port):
-        print(f"BrowserCAD laeuft bereits (Port {port}).")
+        print(f"CAD-Studio-MK1 laeuft bereits (Port {port}).")
         if RUN_MODE == "browser":
             webbrowser.open(f"http://127.0.0.1:{port}/")
         else:
@@ -749,7 +800,7 @@ def main() -> None:
     while not port_free(port):
         port += 1
     url = f"http://127.0.0.1:{port}/"
-    print(f"BrowserCAD {VERSION} - Modus {RUN_MODE} - {url}", flush=True)
+    print(f"CAD-Studio-MK1 {VERSION} - Modus {RUN_MODE} - {url}", flush=True)
 
     from waitress import create_server
     logging.getLogger("waitress.queue").setLevel(logging.ERROR)

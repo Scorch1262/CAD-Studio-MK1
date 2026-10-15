@@ -3,12 +3,17 @@ import * as THREE from '../vendor/three.module.js';
 import * as G from './geom.js';
 import { evalExpr, evalParams, uid, b64ToF32, f32ToB64, b64ToU32, apiJson } from './util.js';
 
-export const PART_FORMAT = 'browsercad-part';
+export const PART_FORMAT = 'cadstudio-part';
+// Formatkennungen der Vorgaengerversion -> aktuelle Kennung (alte Dateien bleiben lesbar)
+const LEGACY_FORMATS = { 'browsercad-part': 'cadstudio-part', 'browsercad-assembly': 'cadstudio-assembly' };
+export function normalizeFormat(data) { if (data && LEGACY_FORMATS[data.format]) data.format = LEGACY_FORMATS[data.format]; return data; }
+export const isLegacyPath = (p) => /\.(bcprt|bcasm)$/i.test(p || '');
 export const FEATURE_INFO = {
   datumPlane: { label: 'Bezugsebene', icon: 'plane' },
   datumAxis: { label: 'Bezugsachse', icon: 'axis' },
   datumPoint: { label: 'Bezugspunkt', icon: 'point' },
   csys: { label: 'Koordinatensystem', icon: 'csys' },
+  sketch: { label: 'Skizze', icon: 'sketch' },
   extrude: { label: 'Extrudieren', icon: 'extrude' },
   revolve: { label: 'Drehen', icon: 'revolve' },
   hole: { label: 'Bohrung', icon: 'hole' },
@@ -43,11 +48,12 @@ export function defaultLayers(p) {
     { name: `03___${p}_ALL_DTM_PNT`, rule: 'datumPoint', items: [], visible: true },
     { name: `04___${p}_ALL_DTM_CSYS`, rule: 'csys', items: [], visible: true },
     { name: `05___${p}_DEF_DTM_PLN`, rule: 'default', items: [], visible: true },
+    { name: `06___${p}_ALL_SKETCHES`, rule: 'sketch', items: [], visible: true },
   ];
 }
 
 export function nextName(doc, type) {
-  const base = { datumPlane: 'DTM', datumAxis: 'A_', datumPoint: 'PNT', csys: 'CS' }[type];
+  const base = { datumPlane: 'DTM', datumAxis: 'A_', datumPoint: 'PNT', csys: 'CS', sketch: 'Skizze ' }[type];
   if (base) {
     let i = type === 'datumPoint' ? 0 : 1;
     while (doc.features.some(f => f.name === `${base}${i}`)) i++;
@@ -96,7 +102,7 @@ async function regenerateKernel(doc, opts = {}) {
   const params = evalParams(doc.params);
   const seg = doc.settings?.seg || 64;
   const ctx = { params, seg, body: null, planes: new Map(), axes: new Map(), points: new Map(), csys: new Map(),
-    tools: new Map(), status: new Map(), errors: [], size: 200, ops: [], imports: [], kernel: true };
+    tools: new Map(), status: new Map(), errors: [], size: 200, ops: [], imports: [], kernel: true, sketches: new Map(), usedSketches: new Set() };
   ctx.X = (v, nm = 'Wert') => { try { return evalExpr(v, params); } catch (e) { throw new Error(`${nm}: ${e.message}`); } };
   const names = new Map();
   for (const { f, rolled } of featureList(doc, opts)) {
@@ -183,9 +189,19 @@ function importGeom(f, ctx) {
 }
 
 const frameJson = (fr) => ({ o: G.v3arr(fr.o), x: G.v3arr(fr.x), y: G.v3arr(fr.y) });
+/** Skizze eines Features: eigene (inline) oder Verweis {ref} auf ein Skizzen-Feature */
+export function sketchSource(ctx, sk) {
+  if (sk?.ref) {
+    const s = ctx.sketches.get(sk.ref);
+    if (!s) throw new Error('Die verwendete Skizze fehlt, ist unterdrückt oder steht im Modellbaum nach diesem Feature');
+    ctx.usedSketches.add(sk.ref);
+    return { frame: s.frame, entities: s.entities };
+  }
+  return { frame: planeRef(ctx, sk.plane), entities: sk.entities || [] };
+}
 function exactSketch(ctx, sk) {
-  const frame = planeRef(ctx, sk.plane);
-  const ents = G.resolveEntities(sk.entities || [], ctx.params);
+  const src = sketchSource(ctx, sk); const frame = src.frame;
+  const ents = G.resolveEntities(src.entities, ctx.params);
   const r = G.sketchCurveLoops(ents, ctx.seg);
   if (r.open) throw new Error(`Skizze nicht geschlossen (${r.open} offene Kette${r.open > 1 ? 'n' : ''})`);
   if (!r.shapes.length) throw new Error('Skizze enthält keine geschlossene Kontur');
@@ -262,7 +278,7 @@ function regenerateLocal(doc, opts = {}) {
   const seg = doc.settings?.seg || 64;
   const ctx = {
     params, seg, body: null, planes: new Map(), axes: new Map(), points: new Map(), csys: new Map(),
-    tools: new Map(), status: new Map(), errors: [], size: 200,
+    tools: new Map(), status: new Map(), errors: [], size: 200, sketches: new Map(), usedSketches: new Set(),
   };
   const X = (v, nm = 'Wert') => { try { return evalExpr(v, params); } catch (e) { throw new Error(`${nm}: ${e.message}`); } };
   ctx.X = X;
@@ -313,8 +329,8 @@ function apply(ctx, f, geom, op) {
 }
 
 function sketchShapes(ctx, sk) {
-  const frame = planeRef(ctx, sk.plane);
-  const ents = G.resolveEntities(sk.entities || [], ctx.params);
+  const src = sketchSource(ctx, sk); const frame = src.frame;
+  const ents = G.resolveEntities(src.entities, ctx.params);
   const { loops, open, axis } = G.sketchLoops(ents, ctx.seg);
   if (open) throw new Error(`Skizze nicht geschlossen (${open} offene Kette${open > 1 ? 'n' : ''})`);
   return { frame, shapes: G.nestLoops(loops), axis, ents };
@@ -358,6 +374,11 @@ const BUILD = {
     ctx.points.set(f.id, { p: v, name: f.name, fid: f.id });
   },
   csys(f, ctx) { ctx.csys.set(f.id, { m: new THREE.Matrix4(), name: f.name, fid: f.id }); },
+  sketch(f, ctx) {
+    const p = f.params; const frame = planeRef(ctx, p.plane);
+    G.resolveEntities(p.entities || [], ctx.params); // Ausdruecke pruefen
+    ctx.sketches.set(f.id, { frame, entities: p.entities || [], name: f.name, fid: f.id });
+  },
   extrude(f, ctx) {
     const p = f.params; const { frame, shapes } = sketchShapes(ctx, p.sketch);
     let d = p.through ? ctx.size * 2 : ctx.X(p.depth, 'Tiefe');

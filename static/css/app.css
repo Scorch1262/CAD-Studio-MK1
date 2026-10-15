@@ -1,4 +1,4 @@
-/* BrowserCAD - dunkles Dashboard-Thema, Layout an PTC Creo angelehnt */
+/* CAD-Studio-MK1 - dunkles Dashboard-Thema, Layout an PTC Creo angelehnt */
 :root {
   --bg0: #0b1016; --bg1: #111821; --bg2: #16202b; --bg3: #1d2a37; --bg4: #263646;
   --line: #2a3a4b; --line2: #34485c;
@@ -117,6 +117,7 @@ input[type=checkbox] { accent-color: var(--acc); }
 .labels { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
 .labels > div { position: absolute; left: 0; top: 0; white-space: nowrap; font-size: 11px; will-change: transform; }
 .lbl.datum { color: var(--datum); text-shadow: 0 0 3px #000; margin: -14px 0 0 3px; }
+.lbl.sketch { color: #63b4ff; text-shadow: 0 0 3px #000; margin: -14px 0 0 3px; }
 .lbl.axis { color: var(--tx); font-weight: 600; text-shadow: 0 0 3px #000; }
 .lbl.measure { color: #111; background: #ffe066; padding: 1px 6px; border-radius: 4px; font-weight: 600; transform-origin: 0 0; margin: -10px 0 0 6px; }
 .dim { pointer-events: auto; color: #ffe066; background: rgba(15, 21, 28, .75); border: 1px solid rgba(255, 224, 102, .35); border-radius: 3px; padding: 0 4px; cursor: pointer; margin: -9px 0 0 -14px; }

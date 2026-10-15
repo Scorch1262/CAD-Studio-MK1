@@ -2,6 +2,7 @@
 import * as THREE from '../vendor/three.module.js';
 import { toCreasedNormals } from '../vendor/addons/utils/BufferGeometryUtils.js';
 import { hiddenByLayer } from './part.js';
+import { sketchPolylines, resolveEntities } from './geom.js';
 
 export const DATUM_COLOR = 0xd9a05b;
 
@@ -47,7 +48,8 @@ export function buildDatums(regen, doc, viewer, filter, prefix = '', hiddenFn = 
   const half = Math.max(20, Math.max(sz.x, sz.y, sz.z) * 0.62 + 5);
   const isHidden = hiddenFn || ((id) => { const f = doc.features?.find(x => x.id === id); return f ? (f.hidden || hiddenByLayer(doc, f)) : false; });
   const mk = (kind) => { const s = new THREE.Group(); s.userData.kind = kind; g.add(s); return s; };
-  const gp = mk('planes'), ga = mk('axes'), gpt = mk('points'), gc = mk('csys');
+  const gp = mk('planes'), ga = mk('axes'), gpt = mk('points'), gc = mk('csys'), gs = mk('sketches');
+  gs.visible = filter.sketches !== false;
   gp.visible = filter.planes; ga.visible = filter.axes; gpt.visible = filter.points; gc.visible = filter.csys;
   for (const [id, pl] of regen.planes) {
     if (isHidden(id)) continue;
@@ -88,6 +90,29 @@ export function buildDatums(regen, doc, viewer, filter, prefix = '', hiddenFn = 
     });
     gc.add(s);
     if (filter.tags) viewer.addLabel(prefix + cs.name, new THREE.Vector3(L * 0.15, -L * 0.15, 0), 'lbl datum', 'datum', s);
+  }
+  // Skizzen-Features: sichtbar, solange nicht ausgeblendet; von Features verwendete Skizzen nur auf Wunsch (wie Creo)
+  for (const [id, sk] of regen.sketches || []) {
+    const f = doc.features?.find(x => x.id === id);
+    if (isHidden(id)) continue;
+    if (regen.usedSketches?.has(id) && !f?.show) continue;
+    let ents; try { ents = resolveEntities(sk.entities, regen.params || {}); } catch { continue; }
+    const s = new THREE.Group(); s.userData = { datumId: id };
+    const colors = { geo: 0x63b4ff, cons: 0x7f8ea3, center: 0xb48cff };
+    let first = null;
+    for (const pl of sketchPolylines(ents)) {
+      const pts = pl.pts.map(p => sk.frame.to3(p.x, p.y));
+      if (!first && pts.length) first = pts[0];
+      const segs = []; for (let i = 0; i + 1 < pts.length; i++) segs.push(pts[i], pts[i + 1]);
+      const geo = new THREE.BufferGeometry().setFromPoints(segs);
+      const mat = pl.kind === 'geo' ? new THREE.LineBasicMaterial({ color: colors.geo }) : new THREE.LineDashedMaterial({ color: colors[pl.kind], dashSize: half / 25, gapSize: half / 50 });
+      const ls = new THREE.LineSegments(geo, mat); if (pl.kind !== 'geo') ls.computeLineDistances();
+      ls.userData = { pick: 'sketch', id, name: sk.name }; ls.renderOrder = 5;
+      s.add(ls);
+    }
+    if (!s.children.length) continue;
+    gs.add(s);
+    if (filter.tags && first) viewer.addLabel(prefix + sk.name, first, 'lbl sketch', 'datum', s);
   }
   return g;
 }

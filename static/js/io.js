@@ -30,7 +30,7 @@ export function parseSTL(bytes) {
   return g;
 }
 
-export function writeSTL(geoms, name = 'BrowserCAD', binary = true) {
+export function writeSTL(geoms, name = 'CAD-Studio-MK1', binary = true) {
   const tris = [];
   for (const g0 of geoms) {
     const g = g0.index ? g0.toNonIndexed() : g0; const p = g.attributes.position.array;
@@ -40,7 +40,7 @@ export function writeSTL(geoms, name = 'BrowserCAD', binary = true) {
   const nrm = (t) => { a.fromArray(t, 0); b.fromArray(t, 3); c.fromArray(t, 6); return b.sub(a).cross(c.sub(a)).normalize(); };
   if (binary) {
     const buf = new ArrayBuffer(84 + tris.length * 50); const dv = new DataView(buf);
-    const head = new TextEncoder().encode(`BrowserCAD STL ${name}`.slice(0, 79)); new Uint8Array(buf).set(head);
+    const head = new TextEncoder().encode(`CAD-Studio-MK1 STL ${name}`.slice(0, 79)); new Uint8Array(buf).set(head);
     dv.setUint32(80, tris.length, true);
     tris.forEach((t, i) => {
       const o = 84 + i * 50; const n = nrm(t);
@@ -100,7 +100,7 @@ export async function readCAD(bytes, kind = 'step') {
  * zusammengefasst; Kanten werden zwischen Nachbarflaechen geteilt.
  * bodies: [{name, geom, matrix?}]
  */
-export function writeSTEP(bodies, productName = 'BrowserCAD') {
+export function writeSTEP(bodies, productName = 'CAD-Studio-MK1') {
   const E = []; let id = 0;
   const add = (s) => { E.push(`#${++id}=${s};`); return `#${id}`; };
   const f = (x) => { if (!isFinite(x) || Math.abs(x) < 1e-12) return '0.'; const s = String(+x.toPrecision(12)); if (s.includes('e')) { let [m, e] = s.split('e'); if (!m.includes('.')) m += '.'; return `${m}E${e}`; } return s.includes('.') ? s : `${s}.`; };
@@ -227,8 +227,8 @@ export function writeSTEP(bodies, productName = 'BrowserCAD') {
   const now = new Date().toISOString().slice(0, 19);
   const header = [
     'ISO-10303-21;', 'HEADER;',
-    `FILE_DESCRIPTION(('BrowserCAD export'),'2;1');`,
-    `FILE_NAME(${str(productName + '.stp')},'${now}',(''),(''),'BrowserCAD','BrowserCAD','');`,
+    `FILE_DESCRIPTION(('CAD-Studio-MK1 export'),'2;1');`,
+    `FILE_NAME(${str(productName + '.stp')},'${now}',(''),(''),'CAD-Studio-MK1','CAD-Studio-MK1','');`,
     "FILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }'));", 'ENDSEC;', 'DATA;',
   ];
   const text = [...header, ...E, 'ENDSEC;', 'END-ISO-10303-21;', ''].join('\n');
@@ -236,9 +236,9 @@ export function writeSTEP(bodies, productName = 'BrowserCAD') {
 }
 
 // ------------------------------------------------------------------ USD (OpenUSD ASCII, Netz)
-export function writeUSDA(bodies, name = 'BrowserCAD') {
+export function writeUSDA(bodies, name = 'CAD-Studio-MK1') {
   const safe = (s) => (String(s).replace(/[^A-Za-z0-9_]/g, '_').replace(/^(\d)/, '_$1') || 'Body');
-  const L = ['#usda 1.0', '(', `    defaultPrim = "${safe(name)}"`, '    metersPerUnit = 0.001', '    upAxis = "Y"', '    doc = "Exportiert von BrowserCAD"', ')', '', `def Xform "${safe(name)}"`, '{'];
+  const L = ['#usda 1.0', '(', `    defaultPrim = "${safe(name)}"`, '    metersPerUnit = 0.001', '    upAxis = "Y"', '    doc = "Exportiert von CAD-Studio-MK1"', ')', '', `def Xform "${safe(name)}"`, '{'];
   const used = new Set();
   bodies.forEach((b, bi) => {
     let g = prepGeom(b.geom); if (b.matrix) g.applyMatrix4(b.matrix);

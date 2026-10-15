@@ -4,7 +4,7 @@ import { uid, evalExpr, evalParams } from './util.js';
 import { regenerate, defaultLayers } from './part.js';
 import * as G from './geom.js';
 
-export const ASM_FORMAT = 'browsercad-assembly';
+export const ASM_FORMAT = 'cadstudio-assembly';
 export const ASM_DATUMS = {
   ASM_RIGHT: { origin: [0, 0, 0], normal: [1, 0, 0], xdir: [0, 0, -1] },
   ASM_TOP: { origin: [0, 0, 0], normal: [0, 1, 0], xdir: [1, 0, 0] },

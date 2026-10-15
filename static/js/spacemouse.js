@@ -41,7 +41,7 @@ export class SpaceMouse {
     };
     es.onerror = () => { this.device = null; this.nativeName = ''; this.onStatus('Verbindung zum Programm unterbrochen'); };
   }
-  saveCfg() { try { localStorage.setItem('browsercad.spacemouse', JSON.stringify(this.cfg)); } catch { /* egal */ } }
+  saveCfg() { try { localStorage.setItem('cadstudio.spacemouse', JSON.stringify(this.cfg)); } catch { /* egal */ } }
 
   async autoConnect() {
     if (!this.supported || this.device) return;
@@ -101,6 +101,6 @@ export class SpaceMouse {
 
 function loadCfg() {
   const base = JSON.parse(JSON.stringify(SM_DEFAULTS));
-  try { const s = JSON.parse(localStorage.getItem('browsercad.spacemouse') || '{}'); return { ...base, ...s, invert: { ...base.invert, ...(s.invert || {}) }, buttons: { ...base.buttons, ...(s.buttons || {}) } }; }
+  try { const s = JSON.parse(localStorage.getItem('cadstudio.spacemouse') || '{}'); return { ...base, ...s, invert: { ...base.invert, ...(s.invert || {}) }, buttons: { ...base.buttons, ...(s.buttons || {}) } }; }
   catch { return base; }
 }

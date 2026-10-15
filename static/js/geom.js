@@ -604,3 +604,26 @@ function pointInPoly(pt, l) {
   }
   return inside;
 }
+
+/** Skizzenelemente -> Polylinien (2D) fuer die Anzeige im 3D (auch offene Ketten, Mittellinien) */
+export function sketchPolylines(entities, seg = 48) {
+  const out = [];
+  for (const e of entities) {
+    switch (e.type) {
+      case 'line': out.push({ pts: [{ x: e.x1, y: e.y1 }, { x: e.x2, y: e.y2 }], kind: e.construction ? 'cons' : 'geo' }); break;
+      case 'centerline': {
+        const dx = e.x2 - e.x1, dy = e.y2 - e.y1, l = Math.hypot(dx, dy) || 1, ext = Math.max(l, 20) * 0.6;
+        out.push({ pts: [{ x: e.x1 - dx / l * ext, y: e.y1 - dy / l * ext }, { x: e.x2 + dx / l * ext, y: e.y2 + dy / l * ext }], kind: 'center' }); break;
+      }
+      case 'circle': out.push({ pts: arcPoints(e.cx, e.cy, e.r, 0, Math.PI * 2, seg), kind: e.construction ? 'cons' : 'geo' }); break;
+      case 'arc': out.push({ pts: arcPoints(e.cx, e.cy, e.r, e.a0 * Math.PI / 180, e.a1 * Math.PI / 180, seg), kind: e.construction ? 'cons' : 'geo' }); break;
+      case 'rect': case 'polygon': case 'slot': {
+        const { loops } = sketchLoops([{ ...e, construction: false }], seg); const l = loops[0];
+        if (l) out.push({ pts: [...l, l[0]], kind: e.construction ? 'cons' : 'geo' });
+        break;
+      }
+      default: break;
+    }
+  }
+  return out;
+}

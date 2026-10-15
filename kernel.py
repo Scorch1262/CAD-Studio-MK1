@@ -1,5 +1,5 @@
 """
-BrowserCAD - Modellierkern auf Basis von NVIDIA usd-brep (https://github.com/NVIDIA-Omniverse/usd-brep).
+CAD-Studio-MK1 - Modellierkern auf Basis von NVIDIA usd-brep (https://github.com/NVIDIA-Omniverse/usd-brep).
 
 Die Oberflaeche berechnet Bezuege und Skizzen und schickt eine Liste von
 Operationen (Extrudieren, Drehen, Bohrung, Rundung, Fase, Muster, Spiegeln,
