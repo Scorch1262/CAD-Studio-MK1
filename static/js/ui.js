@@ -26,6 +26,7 @@ const ICONS = {
   chamfer: P('M4 20V10l6-6h10') + P('M4 4h6 M4 4v6', 'stroke-dasharray="2 2"'),
   pattern: '<rect x="3" y="3" width="6" height="6"/><rect x="15" y="3" width="6" height="6" stroke-dasharray="2 2"/><rect x="3" y="15" width="6" height="6" stroke-dasharray="2 2"/><rect x="15" y="15" width="6" height="6" stroke-dasharray="2 2"/>',
   mirror: P('M12 2v20', 'stroke-dasharray="3 2"') + P('M10 6L3 18h7z M14 6l7 12h-7z'),
+  shell: P('M4 8l8-4 8 4v9l-8 4-8-4z') + P('M7 9.5l5-2.5 5 2.5v6l-5 2.5-5-2.5z', 'stroke-dasharray="2 1.5"'),
   sketch: P('M4 20l4-1L19 8l-3-3L5 16z M14 7l3 3'),
   measure: P('M3 17L17 3l4 4L7 21z M7 13l2 2 M10 10l2 2 M13 7l2 2'),
   mass: P('M7 8h10l3 12H4z M9 8a3 3 0 0 1 6 0'),

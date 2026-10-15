@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.2.0] - 2026-10-15
+### Geändert
+- Modellierkern ist jetzt NVIDIA usd-brep: alle Körper sind exakte NURBS-B-Rep-Modelle (Windows; macOS mangels usd-brep-Paket weiter mit internem Kern)
+- Skizzen werden als exakte Linien, Bögen und Kreise an den Kern übergeben
+- Masseeigenschaften exakt aus der B-Rep inkl. Topologie (Flächen, Kanten, Ecken)
+### Neu
+- Rundung und Fase an beliebigen, auch gekrümmten Kanten
+- Feature „Schale“ (Flächen entfernen, Wandstärke, nach innen/außen)
+- Export als OpenUSD-B-Rep (omniSolid-Schema) und SMLib-B-Rep, exakt
+- Kernanzeige in der Statusleiste, verständliche Fehlermeldungen des Kerns
+- Robuste Boolesche Operationen: Wiederholung mit minimal versetztem Werkzeug bei deckungsgleichen Flächen
+- CI prüft den Kern im Quellcode und in der fertigen exe; Microsoft-C++-Laufzeit wird mitgeliefert
+
 ## [1.1.0] - 2026-10-15
 ### Geändert
 - BrowserCAD ist jetzt ein eigenständiges Desktop-Programm mit eigenem Fenster (Windows: WebView2, macOS: WKWebView) – es öffnet sich kein Browser mehr

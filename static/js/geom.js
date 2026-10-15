@@ -510,3 +510,97 @@ export function planeFromHit(hit) {
 
 export function bboxOf(geom) { geom.computeBoundingBox(); return geom.boundingBox.clone(); }
 export { THREE };
+
+// ------------------------------------------------------------------ Exakte Konturen fuer den usd-brep-Kern
+/**
+ * Entitaeten (Zahlenwerte) -> exakte Konturen: [{outer:[kurve], holes:[[kurve]]}]
+ * Kurve: {t:'line',a:[x,y],b:[x,y]} | {t:'arc',c:[x,y],r,a0,a1 (Grad, gegen Uhrzeigersinn)} | {t:'circle',c:[x,y],r}
+ */
+export function sketchCurveLoops(entities, seg = 64) {
+  const loops = []; const pieces = []; let axis = null;
+  const P = (x, y) => [x, y]; const deg = (r) => r * 180 / Math.PI;
+  const line = (a, b) => ({ t: 'line', a, b });
+  const arc = (c, r, a0, a1) => ({ t: 'arc', c, r, a0, a1 });
+  const poly = (curves) => {
+    const pts = [];
+    for (const c of curves) {
+      if (c.t === 'line') pts.push({ x: c.a[0], y: c.a[1] });
+      else if (c.t === 'arc') pts.push(...arcPoints(c.c[0], c.c[1], c.r, c.a0 * Math.PI / 180, c.a1 * Math.PI / 180, seg).slice(0, -1));
+      else pts.push(...arcPoints(c.c[0], c.c[1], c.r, 0, Math.PI * 2, seg).slice(0, -1));
+    }
+    return pts;
+  };
+  for (const e of entities) {
+    if (e.construction) { if (e.type === 'centerline' && !axis) axis = e; continue; }
+    switch (e.type) {
+      case 'centerline': if (!axis) axis = e; break;
+      case 'circle': if (e.r > 0) loops.push([{ t: 'circle', c: P(e.cx, e.cy), r: e.r }]); break;
+      case 'rect': {
+        const x0 = Math.min(e.x, e.x + e.w), x1 = Math.max(e.x, e.x + e.w), y0 = Math.min(e.y, e.y + e.h), y1 = Math.max(e.y, e.y + e.h);
+        if (x1 - x0 < 1e-9 || y1 - y0 < 1e-9) break;
+        const r = Math.min(e.r || 0, (x1 - x0) / 2 - 1e-6, (y1 - y0) / 2 - 1e-6);
+        if (r > 1e-6) {
+          loops.push([
+            line(P(x0 + r, y0), P(x1 - r, y0)), arc(P(x1 - r, y0 + r), r, 270, 360),
+            line(P(x1, y0 + r), P(x1, y1 - r)), arc(P(x1 - r, y1 - r), r, 0, 90),
+            line(P(x1 - r, y1), P(x0 + r, y1)), arc(P(x0 + r, y1 - r), r, 90, 180),
+            line(P(x0, y1 - r), P(x0, y0 + r)), arc(P(x0 + r, y0 + r), r, 180, 270)]);
+        } else loops.push([line(P(x0, y0), P(x1, y0)), line(P(x1, y0), P(x1, y1)), line(P(x1, y1), P(x0, y1)), line(P(x0, y1), P(x0, y0))]);
+        break;
+      }
+      case 'polygon': {
+        const v = []; for (let i = 0; i < e.n; i++) { const t = (e.rot || 0) * Math.PI / 180 + i * Math.PI * 2 / e.n; v.push(P(e.cx + e.r * Math.cos(t), e.cy + e.r * Math.sin(t))); }
+        loops.push(v.map((p, i) => line(p, v[(i + 1) % v.length]))); break;
+      }
+      case 'slot': {
+        const a = Math.atan2(e.y2 - e.y1, e.x2 - e.x1); const r = e.r;
+        const at = (cx, cy, ang) => P(cx + r * Math.cos(ang), cy + r * Math.sin(ang));
+        const h = Math.PI / 2;
+        loops.push([
+          arc(P(e.x2, e.y2), r, deg(a - h), deg(a + h)), line(at(e.x2, e.y2, a + h), at(e.x1, e.y1, a + h)),
+          arc(P(e.x1, e.y1), r, deg(a + h), deg(a + 3 * h)), line(at(e.x1, e.y1, a + 3 * h), at(e.x2, e.y2, a - h))]);
+        break;
+      }
+      case 'line': pieces.push({ s: P(e.x1, e.y1), e: P(e.x2, e.y2), c: line(P(e.x1, e.y1), P(e.x2, e.y2)) }); break;
+      case 'arc': {
+        const a0 = e.a0 * Math.PI / 180, a1 = e.a1 * Math.PI / 180;
+        pieces.push({ s: P(e.cx + e.r * Math.cos(a0), e.cy + e.r * Math.sin(a0)), e: P(e.cx + e.r * Math.cos(a1), e.cy + e.r * Math.sin(a1)), c: arc(P(e.cx, e.cy), e.r, e.a0, e.a1) });
+        break;
+      }
+      default: break;
+    }
+  }
+  // Linien/Boegen ueber gemeinsame Endpunkte zu geschlossenen Ketten verbinden
+  const tol = 1e-4; const same = (p, q) => Math.abs(p[0] - q[0]) < tol && Math.abs(p[1] - q[1]) < tol;
+  const used = new Array(pieces.length).fill(false); let open = 0;
+  for (let i = 0; i < pieces.length; i++) {
+    if (used[i]) continue; used[i] = true;
+    const chain = [pieces[i]]; let start = pieces[i].s, end = pieces[i].e; let grown = true;
+    while (grown && !same(start, end)) {
+      grown = false;
+      for (let j = 0; j < pieces.length; j++) {
+        if (used[j]) continue; const pc = pieces[j];
+        if (same(pc.s, end)) { end = pc.e; } else if (same(pc.e, end)) { end = pc.s; } else continue;
+        chain.push(pc); used[j] = true; grown = true; break;
+      }
+    }
+    if (chain.length >= 2 && same(start, end)) loops.push(chain.map(x => x.c)); else open++;
+  }
+  // Verschachtelung ueber Polygonnaeherung
+  const L = loops.map(curves => { const l = poly(curves); return { curves, l, A: Math.abs(loopArea(l)), parent: null, depth: 0 }; }).sort((a, b) => b.A - a.A);
+  for (let i = 0; i < L.length; i++) {
+    const p = L[i].l[0];
+    for (let j = i - 1; j >= 0; j--) if (pointInPoly(p, L[j].l)) { L[i].parent = L[j]; L[i].depth = L[j].depth + 1; break; }
+  }
+  const shapes = [];
+  for (const o of L) if (o.depth % 2 === 0) shapes.push({ outer: o.curves, holes: L.filter(h => h.parent === o).map(h => h.curves) });
+  return { shapes, open, axis };
+}
+function pointInPoly(pt, l) {
+  let inside = false;
+  for (let i = 0, j = l.length - 1; i < l.length; j = i++) {
+    const a = l[i], b = l[j];
+    if ((a.y > pt.y) !== (b.y > pt.y) && pt.x < (b.x - a.x) * (pt.y - a.y) / (b.y - a.y) + a.x) inside = !inside;
+  }
+  return inside;
+}

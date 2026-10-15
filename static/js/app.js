@@ -6,7 +6,7 @@ import * as G from './geom.js';
 import { Viewer, VIEWS } from './viewer.js';
 import { Sketcher, SKETCH_TOOLS } from './sketcher.js';
 import { SpaceMouse } from './spacemouse.js';
-import { PART_FORMAT, FEATURE_INFO, newPart, regenerate, makeFeature, importFeature, dependents, hiddenByLayer, planeRef } from './part.js';
+import { PART_FORMAT, FEATURE_INFO, newPart, regenerate, makeFeature, importFeature, dependents, hiddenByLayer, planeRef, setKernel, KERNEL, edgeRefFromPoly } from './part.js';
 import { ASM_FORMAT, ASM_DATUMS, CONSTRAINT_NAMES, newAssembly, newComponent, regenerateAssembly, flattenBodies, entryBox } from './assembly.js';
 import { buildBody, buildDatums, applyDisplayStyle, highlightMesh, faceGroup, DATUM_COLOR } from './render.js';
 import { parseSTL, writeSTL, readCAD, writeSTEP, writeUSDA } from './io.js';
@@ -50,6 +50,9 @@ async function init() {
   buildIGT(); bindKeys(); bindNavTabs(); bindDesktop();
   try { App.server = await api('/api/state'); } catch (e) { status('Server nicht erreichbar: ' + e.message, 'err'); return; }
   App.desktop = App.server.mode === 'desktop';
+  setKernel(App.server.kernel);
+  { const k = $('#kernel-status'); k.textContent = KERNEL.available ? `Kern: usd-brep ${KERNEL.version}` : 'Kern: intern (Netz)';
+    k.title = KERNEL.available ? 'Exakter NURBS-B-Rep-Kern NVIDIA usd-brep' : `usd-brep nicht verfügbar – interner Netzkern aktiv. ${App.server.kernel?.error || ''}`; k.classList.toggle('on', KERNEL.available); }
   document.body.classList.toggle('desktop', App.desktop);
   if (!App.desktop) window.addEventListener('beforeunload', (e) => { if (App.docs.some(d => d.dirty)) { e.preventDefault(); e.returnValue = ''; } });
   App.sm = new SpaceMouse({
@@ -205,7 +208,7 @@ async function rebuild(d = doc(), opts = {}) {
   if (!d) return;
   try {
     if (d.kind === 'part') {
-      d.res = regenerate(d.data, opts);
+      d.res = await regenerate(d.data, opts);
     } else {
       d.res = await regenerateAssembly(d.data, loadDocForAsm, App.partCache);
     }
@@ -376,14 +379,28 @@ async function closeDoc(d = doc()) {
 
 async function exportDialog() {
   const d = doc(); if (!d) return;
-  const fmtSel = el('select', {}, el('option', { value: 'step' }, 'STEP AP214 (.stp)'), el('option', { value: 'stlb' }, 'STL binär (.stl)'), el('option', { value: 'stla' }, 'STL ASCII (.stl)'), el('option', { value: 'usda' }, 'OpenUSD ASCII (.usda)'));
+  const fmtSel = el('select', {},
+    KERNEL.available ? el('option', { value: 'usdb' }, 'OpenUSD B-Rep, exakt NURBS – usd-brep (.usda)') : null,
+    KERNEL.available && isPart(d) ? el('option', { value: 'smb' }, 'SMLib B-Rep, exakt – usd-brep (.brep)') : null,
+    el('option', { value: 'step', selected: true }, 'STEP AP214 (.stp)'), el('option', { value: 'stlb' }, 'STL binär (.stl)'), el('option', { value: 'stla' }, 'STL ASCII (.stl)'), el('option', { value: 'usda' }, 'OpenUSD Netz (.usda)'));
   const name = el('input', { value: d.data.name.toLowerCase() });
   const dl = el('input', { type: 'checkbox', checked: !App.desktop });
   const r = await modal({ title: 'Exportieren', body: el('div', {}, el('label', { class: 'fld' }, 'Format', fmtSel), el('label', { class: 'fld' }, 'Dateiname (ohne Endung)', name),
     el('label', { class: 'chk' }, dl, App.desktop ? 'Zusätzlich an einem anderen Ort speichern…' : 'Zusätzlich im Browser herunterladen'),
-    el('p', { class: 'muted small' }, 'Die Datei wird ins Arbeitsverzeichnis geschrieben. STEP wird als Volumenkörper (B-Rep) mit ebenen Flächen ausgegeben; gekrümmte Flächen sind facettiert. Baugruppen werden als Mehrkörper-Datei exportiert.')),
+    el('p', { class: 'muted small' }, 'Die Datei wird ins Arbeitsverzeichnis geschrieben. ' + (KERNEL.available ? 'OpenUSD B-Rep und SMLib B-Rep enthalten die exakte NURBS-Geometrie aus usd-brep (omniSolid-Schema). ' : '') + 'STEP wird als Volumenkörper mit ebenen Flächen ausgegeben (gekrümmte Flächen facettiert), da usd-brep keine STEP-Ausgabe bietet. Baugruppen werden als Mehrkörper-Datei exportiert.')),
   buttons: [{ label: 'Abbrechen', value: null }, { label: 'Exportieren', primary: true, value: () => ({ f: fmtSel.value, n: name.value.trim(), dl: dl.checked }) }] });
   if (!r) return;
+  if (r.f === 'usdb' || r.f === 'smb') {
+    const parts = isPart(d) ? [{ ops: d.res.ops || [], name: d.data.name }] : flattenKernelParts(d.res);
+    if (!parts.some(p => p.ops.length)) { toast('Keine B-Rep-Geometrie (importierte Netze werden in diesen Formaten nicht ausgegeben)', 'warn'); return; }
+    await busy('Exportiere exakte B-Rep…', async () => {
+      const file = `${r.n}.${r.f === 'smb' ? 'brep' : 'usda'}`;
+      const res = await apiJson('/api/kernel/export', { parts, path: file, format: r.f === 'smb' ? 'brep' : 'usd' });
+      if (r.dl) { const na = nativeApi(); if (na) { const p = await na.save_copy(file); if (p) toast(`Kopie gespeichert: ${p}`, 'ok'); } else window.open(`/api/file?path=${encodeURIComponent(file)}&download=1`); }
+      await refreshFiles(); status(`Exportiert (exakt, ${res.bodies} Körper): ${file}`, 'ok', 6000);
+    });
+    return;
+  }
   const bodies = isPart(d) ? (d.res.display ? [{ name: d.data.name, geom: d.res.display, color: hexToRgb(d.data.color) }] : []) : flattenBodies(d.res).map(b => ({ ...b, color: hexToRgb(b.color) }));
   if (!bodies.length) { toast('Keine Geometrie zum Exportieren', 'warn'); return; }
   await busy('Exportiere…', async () => {
@@ -397,6 +414,17 @@ async function exportDialog() {
     await refreshFiles();
     status(`Exportiert: ${file}`, 'ok', 5000);
   });
+}
+/** Baugruppe -> Liste aus Kern-Operationen je Part mit Weltmatrix (fuer exakten Export) */
+function flattenKernelParts(res, parent = new THREE.Matrix4()) {
+  const out = [];
+  for (const e of res.comps) {
+    if (e.comp.suppressed || e.comp.hidden) continue;
+    const m = parent.clone().multiply(e.matrix);
+    if (e.regen?.ops?.length) out.push({ ops: e.regen.ops, matrix: Array.from(m.elements), name: e.comp.name });
+    if (e.sub) out.push(...flattenKernelParts(e.sub, m));
+  }
+  return out;
 }
 const hexToRgb = (h) => { if (!h) return null; const c = new THREE.Color(h); return [c.r, c.g, c.b]; };
 
@@ -461,7 +489,9 @@ function toResult(h) {
     const p = o.geometry.attributes.position; const i = h.index - (h.index % 2);
     const a = new THREE.Vector3().fromBufferAttribute(p, i), b = new THREE.Vector3().fromBufferAttribute(p, i + 1);
     const body = o.parent.children.find(c => c.userData.role === 'body');
-    return { kind: 'edge', a, b, mesh: body?.userData.mesh, compId: u.compId, obj: o, name: 'Kante', world: o.matrixWorld.clone() };
+    const ud = o.geometry.userData || {}; const ei = ud.segEdge ? ud.segEdge[i / 2] : -1;
+    const edgeRef = ei >= 0 && ud.polys ? edgeRefFromPoly(ud.polys[ei]) : null;
+    return { kind: 'edge', a, b, mesh: body?.userData.mesh, compId: u.compId, obj: o, name: edgeRef ? `Kante (${fmt(edgeRef.len, 2)} mm)` : 'Kante', world: o.matrixWorld.clone(), edgeRef, edgePoly: ei >= 0 ? ud.polys[ei] : null };
   }
   if (u.role === 'body') {
     const mesh = u.mesh; const fg = faceGroup(mesh, h.faceIndex);
@@ -595,7 +625,9 @@ function runFeature({ feat, replaceId, title, fields, apply, after }) {
   const d = doc(); closeDash();
   const preview = debounce(async () => {
     try { apply(App.dash.vals, feat); } catch (e) { App.dash.error(e.message); return; }
-    const res = regenerate(d.data, { extra: feat, replaceId });
+    const seq = (App._pseq = (App._pseq || 0) + 1);
+    const res = await regenerate(d.data, { extra: feat, replaceId, preview: true });
+    if (seq !== App._pseq || !App.dash) return; // veraltete Vorschau verwerfen
     showResult(d, res); App._preview = res;
     const err = res.errors.find(x => x.id === feat.id); App.dash?.error(err ? err.msg : '');
   }, 220);
@@ -614,7 +646,7 @@ function runFeature({ feat, replaceId, title, fields, apply, after }) {
     },
     onOk: async (vals) => {
       apply(vals, feat);
-      const res = regenerate(d.data, { extra: feat, replaceId });
+      const res = await regenerate(d.data, { extra: feat, replaceId });
       const err = res.errors.find(x => x.id === feat.id);
       if (err) { App.dash.error(err.msg); return false; }
       await commit((data) => {
@@ -684,16 +716,18 @@ function openRevolveDash(feat, existing) {
   });
 }
 /** Creo-Verhalten: Schnittrichtung so waehlen, dass Material entfernt wird */
-function cutDirection(feat, v) {
+async function cutDirection(feat, v) {
   const d = doc(); if (!d.res.display) return !!v.flip;
-  const vol = (flip) => { const t = clone(feat); Object.assign(t.params, { side: v.side, depth: v.depth, depth2: v.depth2, through: v.through, op: 'cut', flip }); t.params.sketch.plane = v.plane;
-    const r = regenerate(d.data, { extra: t, replaceId: d.data.features.some(x => x.id === feat.id) ? feat.id : undefined }); return r.display ? G.signedVolume(r.display) : 0; };
-  try { return vol(true) < vol(false) - 1e-6; } catch { return !!v.flip; }
+  const vol = async (flip) => { const t = clone(feat); Object.assign(t.params, { side: v.side, depth: v.depth, depth2: v.depth2, through: v.through, op: 'cut', flip }); t.params.sketch.plane = v.plane;
+    const r = await regenerate(d.data, { extra: t, preview: true, replaceId: d.data.features.some(x => x.id === feat.id) ? feat.id : undefined });
+    if (r.errors.some(e => e.id === feat.id)) return Infinity;
+    return r.props?.volume ?? (r.display ? G.signedVolume(r.display) : 0); };
+  try { const [a, b] = [await vol(true), await vol(false)]; return a < b - 1e-6; } catch { return !!v.flip; }
 }
-function openExtrudeDash(feat, existing) {
+async function openExtrudeDash(feat, existing) {
   const p = feat.params;
   // Neues Feature auf vorhandenem Koerper: Richtung vorschlagen (ins Material bei Entfernen)
-  if (!existing && d0().res.display && p.op === 'cut' && p._dirAuto === undefined) { p._dirAuto = true; p.flip = cutDirection(feat, { ...p, plane: p.sketch.plane }); }
+  if (!existing && d0().res.display && p.op === 'cut' && p._dirAuto === undefined) { p._dirAuto = true; p.flip = await cutDirection(feat, { ...p, plane: p.sketch.plane }); }
   runFeature({
     feat, replaceId: existing?.id, title: feat.name,
     fields: [
@@ -702,7 +736,7 @@ function openExtrudeDash(feat, existing) {
       { key: 'depth2', label: 'Seite 2', type: 'expr', value: p.depth2 ?? p.depth, show: (v) => v.side === 'two' && !v.through },
       { key: 'through', label: 'Durch alles', type: 'check', value: !!p.through, rerender: true },
       { key: 'flip', label: 'Richtung umkehren', type: 'check', value: !!p.flip },
-      { key: 'op', label: 'Material', type: 'select', value: p.op || 'add', options: [['add', 'Hinzufügen'], ['cut', 'Entfernen']], after: (v) => { if (v.op === 'cut') v.flip = cutDirection(feat, v); } },
+      { key: 'op', label: 'Material', type: 'select', value: p.op || 'add', options: [['add', 'Hinzufügen'], ['cut', 'Entfernen']], after: async (v) => { if (v.op === 'cut') v.flip = await cutDirection(feat, v); } },
       { key: 'plane', label: 'Skizzierebene', type: 'select', ref: ['plane', 'face'], value: p.sketch.plane, options: (v) => planeOptions(v, 'plane') },
       { type: 'button', label: 'Skizze bearbeiten', icon: 'sketch', onClick: async (vals) => {
         closeDash(); Object.assign(feat.params, { side: vals.side, depth: vals.depth, depth2: vals.depth2, through: vals.through, flip: vals.flip, op: vals.op }); feat.params.sketch.plane = vals.plane;
@@ -748,15 +782,17 @@ async function featEdge(type, existing) {
   if (!isPart()) return;
   const d = doc(); if (!d.res.body) { toast('Kein Körper vorhanden', 'warn'); return; }
   const feat = existing ? clone(existing) : makeFeature(d.data, type, { size: type === 'round' ? 3 : 1, edges: [] });
-  if (!existing && App.sel[0]?.kind === 'edge') { try { feat.params.edges.push(G.edgeInfo(App.sel[0].mesh, App.sel[0].a, App.sel[0].b)); } catch (e) { toast(e.message, 'warn'); } }
+  const edgeData = (r) => { if (KERNEL.available) { if (!r.edgeRef) throw new Error('Kante gehört nicht zum B-Rep-Körper (importierte Geometrie?)'); return r.edgeRef; } return G.edgeInfo(r.mesh, r.a, r.b); };
+  const midOf = (e) => e.mid || e.a.map((v, i) => (v + e.b[i]) / 2);
+  if (!existing && App.sel[0]?.kind === 'edge') { try { feat.params.edges.push(edgeData(App.sel[0])); } catch (e) { toast(e.message, 'warn'); } }
   const chooseEdges = async () => {
     closeDash(); await rebuild();
-    const showSel = () => { App.selHl.clear(); for (const e of feat.params.edges) App.selHl.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(...e.a), new THREE.Vector3(...e.b)]), new THREE.LineBasicMaterial({ color: 0xffb020, depthTest: false }))); App.viewer.request(); };
+    const showSel = () => { App.selHl.clear(); for (const e of feat.params.edges) { const l = new THREE.Line(new THREE.BufferGeometry().setFromPoints((e.poly || [e.a, e.b]).map(p => new THREE.Vector3(...p))), new THREE.LineBasicMaterial({ color: 0xffb020, depthTest: false })); l.renderOrder = 30; App.selHl.add(l); } App.viewer.request(); };
     showSel();
     const res = await pick({ kinds: ['edge'], multi: true, prompt: 'Kanten anklicken (erneut klicken = abwählen)', onToggle: (r) => {
       try {
-        const info = G.edgeInfo(r.mesh, r.a, r.b);
-        const k = feat.params.edges.findIndex(e => Math.hypot(...e.a.map((x, i) => x - info.a[i])) + Math.hypot(...e.b.map((x, i) => x - info.b[i])) < 1e-3);
+        const info = edgeData(r); const mi = midOf(info);
+        const k = feat.params.edges.findIndex(e => Math.hypot(...midOf(e).map((x, i) => x - mi[i])) < 1e-3);
         if (k >= 0) feat.params.edges.splice(k, 1); else feat.params.edges.push(info);
         showSel(); status(`${feat.params.edges.length} Kante(n) gewählt – Enter oder Rechtsklick beendet die Auswahl`, 'pick');
       } catch (e) { toast(e.message, 'warn'); }
@@ -771,7 +807,7 @@ async function featEdge(type, existing) {
       { key: 'size', label: type === 'round' ? 'Radius' : 'Abstand D', type: 'expr', value: feat.params.size },
       { type: 'info', value: () => `${feat.params.edges.length} Kante(n)` },
       { type: 'button', label: 'Kanten wählen…', icon: 'select', primary: !feat.params.edges.length, onClick: () => chooseEdges() },
-      { type: 'info', value: 'Nur gerade Kanten zwischen ebenen Flächen' },
+      { type: 'info', value: KERNEL.available ? 'Beliebige Kanten (gerade und gekrümmt)' : 'Nur gerade Kanten zwischen ebenen Flächen (interner Kern)' },
     ],
     apply: (v, f) => { f.params.size = v.size; },
   });
@@ -805,6 +841,37 @@ async function featPattern(existing) {
     apply: (v, f) => Object.assign(f.params, { ref: v.ref, kind: v.kind, dir: v.dir, count: v.count, spacing: v.spacing, dir2: v.dir2 || null, count2: v.count2, spacing2: v.spacing2, axis: v.axis, angle: v.angle }),
   });
 }
+async function featShell(existing) {
+  if (!isPart()) return;
+  const d = doc(); if (!d.res.body) { toast('Kein Körper vorhanden', 'warn'); return; }
+  if (!KERNEL.available) { toast('Schale benötigt den usd-brep-Kern (unter macOS nicht verfügbar)', 'warn'); return; }
+  const feat = existing ? clone(existing) : makeFeature(d.data, 'shell', { thickness: 2, faces: [], outward: false });
+  const chooseFaces = async () => {
+    closeDash(); await rebuild();
+    const showSel = () => { App.selHl.clear(); for (const f of feat.params.faces) if (f.hl) App.selHl.add(highlightMesh(f.hl, 0xffb020, 0.45)); App.viewer.request(); };
+    showSel();
+    await pick({ kinds: ['face'], multi: true, prompt: 'Zu entfernende Flächen anklicken (erneut = abwählen), Enter/Rechtsklick beendet', filter: (h) => !h.object.userData.compId, onToggle: (r) => {
+      const pt = G.v3arr(r.point).map(v => +v.toFixed(6));
+      const k = feat.params.faces.findIndex(f => new THREE.Vector3(...(f.normal || [0, 0, 0])).dot(r.normal) > 0.9999 && Math.abs(new THREE.Vector3(...f.point).sub(r.point).dot(r.normal)) < 1e-4);
+      if (k >= 0) feat.params.faces.splice(k, 1); else feat.params.faces.push({ point: pt, normal: G.v3arr(r.normal), hl: r.hlGeom });
+      showSel(); status(`${feat.params.faces.length} Fläche(n) gewählt`, 'pick');
+    } });
+    App.selHl.clear();
+    openDash();
+  };
+  const openDash = () => runFeature({
+    feat, replaceId: existing?.id, title: feat.name,
+    fields: [
+      { key: 'thickness', label: 'Wandstärke', type: 'expr', value: feat.params.thickness },
+      { key: 'outward', label: 'Nach außen', type: 'check', value: !!feat.params.outward },
+      { type: 'info', value: () => `${feat.params.faces.length} Fläche(n) entfernt` },
+      { type: 'button', label: 'Flächen wählen…', icon: 'select', onClick: () => chooseFaces() },
+    ],
+    apply: (v, f) => { f.params.thickness = v.thickness; f.params.outward = v.outward; f.params.faces = feat.params.faces.map(x => ({ point: x.point, normal: x.normal })); },
+  });
+  if (!existing) await chooseFaces(); else openDash();
+}
+
 async function featMirror(existing) {
   if (!isPart()) return;
   const d = doc(); if (!existing && !d.res.body) { toast('Kein Körper zum Spiegeln', 'warn'); return; }
@@ -870,7 +937,7 @@ async function featDatumPoint(existing) {
 
 function editFeature(f) {
   const map = { extrude: () => openExtrudeDash(clone(f), f), revolve: () => openRevolveDash(clone(f), f), hole: () => featHole(f), round: () => featEdge('round', f), chamfer: () => featEdge('chamfer', f),
-    pattern: () => featPattern(f), mirror: () => featMirror(f), datumPlane: () => featDatumPlane(f), datumAxis: () => featDatumAxis(f), datumPoint: () => featDatumPoint(f),
+    pattern: () => featPattern(f), mirror: () => featMirror(f), shell: () => featShell(f), datumPlane: () => featDatumPlane(f), datumAxis: () => featDatumAxis(f), datumPoint: () => featDatumPoint(f),
     import: () => editImport(f), csys: () => toast('Das Standard-Koordinatensystem ist fest', 'info') };
   map[f.type]?.();
 }
@@ -1055,6 +1122,7 @@ function clearMeasure() { App.measureG.clear(); App.viewer.clearLabels('measure'
 
 async function massProps() {
   const d = doc(); if (!d?.res) return;
+  if (isPart(d) && d.res.props && !d.res.imports?.length) return massDialog(d, d.res.props);
   const bodies = isPart(d) ? (d.res.display ? [{ geom: d.res.display, matrix: null, name: d.data.name }] : []) : flattenBodies(d.res);
   if (!bodies.length) { toast('Keine Geometrie', 'warn'); return; }
   let V = 0, A = 0; const C = new THREE.Vector3(); const bb = new THREE.Box3();
@@ -1159,9 +1227,29 @@ function helpDialog() {
     el('h4', {}, 'Tastatur'), el('table', { class: 'props' },
       r('Strg+S', 'Speichern'), r('Strg+Z / Strg+Y', 'Rückgängig / Wiederherstellen'), r('Strg+G', 'Regenerieren'), r('Strg+D', 'Standardausrichtung'), r('Strg+R', 'Neu zeichnen'),
       r('Esc', 'Aktion abbrechen'), r('Entf', 'Gewähltes Feature löschen')),
+    el('h4', {}, 'Modellierkern'),
+    el('p', {}, KERNEL.available
+      ? `NVIDIA usd-brep ${KERNEL.version}: exakte NURBS-B-Rep-Volumenkörper. Rundung und Fase an beliebigen Kanten, Schale, exakte Masseeigenschaften, Export als OpenUSD-B-Rep und SMLib-B-Rep.`
+      : `Interner Netzkern (usd-brep ist auf diesem System nicht verfügbar – NVIDIA bietet es nur für Windows und Linux an). Rundung/Fase nur an geraden Kanten, keine Schale. ${App.server?.kernel?.error || ''}`),
     el('h4', {}, 'Arbeitsweise'),
     el('p', {}, 'Wie in Creo: Ebene oder Fläche wählen → Extrudieren/Drehen → Skizze zeichnen → ✔ → Tiefe im Dashboard einstellen → ✔. Doppelklick im Modellbaum öffnet die Definition. „Hier einfügen“ im Kontextmenü setzt die Einfügemarke.')),
   buttons: [{ label: 'Schließen', value: true, primary: true }] });
+}
+
+async function massDialog(d, p) {
+  const dens = el('input', { value: localStorage.getItem('browsercad.density') || '7.85', style: 'width:80px' });
+  const massEl = el('b');
+  const upd = () => { const rho = +dens.value.replace(',', '.') || 0; massEl.textContent = `${fmt(p.volume / 1000 * rho, 3)} g  (${fmt(p.volume / 1e6 * rho, 4)} kg)`; try { localStorage.setItem('browsercad.density', dens.value); } catch { /* egal */ } };
+  dens.oninput = upd; upd();
+  const bb = d.res.bbox.getSize(new THREE.Vector3()); const c = p.centroid || [0, 0, 0];
+  const row = (k, v) => el('tr', {}, el('td', {}, k), el('td', {}, v));
+  await modal({ title: `Masseeigenschaften – ${d.data.name}`, width: 540, body: el('div', {}, el('table', { class: 'props' },
+    row('Volumen', `${fmt(p.volume, 4)} mm³  (${fmt(p.volume / 1000, 5)} cm³)`), row('Oberfläche', `${fmt(p.area, 4)} mm²`),
+    row('Dichte', el('span', {}, dens, ' g/cm³')), row('Masse', massEl),
+    row('Schwerpunkt', `X ${fmt(c[0], 4)}  Y ${fmt(c[1], 4)}  Z ${fmt(c[2], 4)}`),
+    row('Begrenzungsquader', `${fmt(bb.x, 3)} × ${fmt(bb.y, 3)} × ${fmt(bb.z, 3)} mm`),
+    row('Topologie', `${p.faces} Flächen · ${p.edges} Kanten · ${p.vertices} Ecken${p.manifold ? ' · geschlossener Volumenkörper' : ' · nicht geschlossen'}`)),
+    el('p', { class: 'muted small' }, 'Exakt aus der NURBS-B-Rep berechnet (usd-brep).')), buttons: [{ label: 'Schließen', value: true, primary: true }] });
 }
 
 async function exitApp() {
@@ -1202,7 +1290,7 @@ const CMD = {
   workdir: () => workdirDialog(false), undo: () => undo(), redo: () => redo(), regen: async () => { App.partCache.clear(); await rebuild(); }, import: () => (isAsm() ? asmImport() : importIntoPart()),
   datumPlane: () => featDatumPlane(), datumAxis: () => featDatumAxis(), datumPoint: () => featDatumPoint(),
   extrude: () => featExtrude(), revolve: () => featRevolve(), hole: () => featHole(), round: () => featEdge('round'), chamfer: () => featEdge('chamfer'),
-  pattern: () => featPattern(), mirror: () => featMirror(),
+  pattern: () => featPattern(), mirror: () => featMirror(), shell: () => featShell(),
   measure: () => measureDistance(), clearMeasure: () => clearMeasure(), mass: () => massProps(),
   fit: () => App.viewer.fit(doc()?.res?.bbox), zoomin: () => App.viewer.zoomAt(1.25), zoomout: () => App.viewer.zoomAt(0.8), repaint: () => App.viewer.request(),
   standard: () => App.viewer.setView('standard', doc()?.res?.bbox), color: () => modelColor(), screenshot: () => screenshot(),
@@ -1244,7 +1332,7 @@ function ribbonSpec() {
       { label: 'Daten holen', items: [{ id: 'import', label: 'Importieren', icon: 'import', big: true }] },
       { label: 'Bezug', items: [{ id: 'datumPlane', label: 'Ebene', icon: 'plane', big: true }, { id: 'datumAxis', label: 'Achse', icon: 'axis' }, { id: 'datumPoint', label: 'Punkt', icon: 'point' }] },
       { label: 'Formen', items: [{ id: 'extrude', label: 'Extrudieren', icon: 'extrude', big: true }, { id: 'revolve', label: 'Drehen', icon: 'revolve', big: true }] },
-      { label: 'Konstruktion', items: [{ id: 'hole', label: 'Bohrung', icon: 'hole', big: true }, { id: 'round', label: 'Rundung', icon: 'round', big: true }, { id: 'chamfer', label: 'Fase', icon: 'chamfer', big: true }] },
+      { label: 'Konstruktion', items: [{ id: 'hole', label: 'Bohrung', icon: 'hole', big: true }, { id: 'round', label: 'Rundung', icon: 'round', big: true }, { id: 'chamfer', label: 'Fase', icon: 'chamfer', big: true }, { id: 'shell', label: 'Schale', icon: 'shell', big: true }] },
       { label: 'Editieren', items: [{ id: 'pattern', label: 'Muster', icon: 'pattern', big: true }, { id: 'mirror', label: 'Spiegeln', icon: 'mirror', big: true }] },
     ],
     analysis: [

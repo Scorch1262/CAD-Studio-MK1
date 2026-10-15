@@ -140,7 +140,7 @@ input[type=checkbox] { accent-color: var(--acc); }
 .status-msg { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--tx2); }
 .status-msg.ok { color: var(--ok); } .status-msg.err { color: var(--err); } .status-msg.pick { color: #ffe066; } .status-msg.warn { color: var(--warn); }
 .pill { color: var(--tx3); border: 1px solid var(--line); border-radius: 10px; padding: 1px 8px; white-space: nowrap; max-width: 380px; overflow: hidden; text-overflow: ellipsis; }
-#sm-status.on { color: var(--ok); border-color: rgba(76, 224, 106, .4); }
+#sm-status.on, #kernel-status.on { color: var(--ok); border-color: rgba(76, 224, 106, .4); }
 
 /* Buttons */
 .btn { display: inline-flex; align-items: center; gap: 6px; background: var(--bg3); border: 1px solid var(--line2); border-radius: 5px; padding: 6px 12px; cursor: pointer; white-space: nowrap; }

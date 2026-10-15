@@ -1,10 +1,12 @@
-# BrowserCAD 1.1.0
+# BrowserCAD 1.2.0
 
 Eigenständiges 3D-CAD-Programm für Windows und macOS im dunklen Dashboard-Stil, dessen Bedienung sich an
 **PTC Creo Parametric** orientiert: Menüband mit Registerkarten, Modellbaum mit Einfügemarke, Feature-Dashboard
 mit ✔/✖, Layerbaum, Bezugsanzeige-Filter, Creo-Maussteuerung und 3Dconnexion-SpaceMouse.
 
 BrowserCAD läuft in **einem eigenen Programmfenster** – es wird kein Browser geöffnet und keiner benötigt.
+Modellierkern ist **[NVIDIA usd-brep](https://github.com/NVIDIA-Omniverse/usd-brep)**: alle Volumenkörper sind exakte
+NURBS-B-Rep-Modelle.
 GitHub Actions baut daraus eine **Windows-exe** und eine **macOS-App** und legt automatisch ein **Release** an.
 
 ---
@@ -13,7 +15,7 @@ GitHub Actions baut daraus eine **Windows-exe** und eine **macOS-App** und legt 
 
 | System | Start |
 |---|---|
-| Windows 10/11 | `BrowserCAD-1.1.0-windows-x64.exe` doppelklicken. Benötigt die Microsoft-WebView2-Laufzeit (auf Windows 11 und aktuellen Windows-10-Systemen vorhanden; sonst kostenlos bei Microsoft). |
+| Windows 10/11 | `BrowserCAD-1.2.0-windows-x64.exe` doppelklicken. Benötigt die Microsoft-WebView2-Laufzeit (auf Windows 11 und aktuellen Windows-10-Systemen vorhanden; sonst kostenlos bei Microsoft). |
 | macOS 12+ | ZIP entpacken, `BrowserCAD.app` beim ersten Mal per **Rechtsklick › Öffnen** starten (App ist nicht notarisiert). |
 | Quellcode | `pip install -r requirements.txt` und `python browsercad.py` |
 
@@ -37,7 +39,7 @@ Ein zweiter Start holt das bereits laufende Fenster nach vorn.
 - **Bezüge:** Standard-Ebenen RIGHT/TOP/FRONT, PRT_CSYS_DEF, Bezugsebene (Versatz/Winkel zu Ebene oder Fläche), Bezugsachse (Schnitt zweier Ebenen oder Punkt+Richtung), Bezugspunkt
 - **Skizzierer:** Linie (Kette), Rechteck (mit Eckenradius), Kreis, Bogen (3 Punkte), Mittellinie, Polygon, Langloch, Verrundung, Kante übernehmen; Fangen an Punkten/Raster/Referenzen; Maße im Grafikbereich anklicken und ändern; Konstruktionselemente
 - **Formen:** Extrudieren (eine Seite / symmetrisch / beide Seiten / durch alles, hinzufügen/entfernen, Richtung ins Material wird wie in Creo automatisch vorgeschlagen), Drehen (um Mittellinie)
-- **Konstruktion:** Bohrung (Platzierung per Klick auf Fläche, Ø, Tiefe/durch, Bohrerspitze, zylindrische/kegelige Senkung), Rundung und Fase an geraden Kanten (konvex und konkav)
+- **Konstruktion:** Bohrung (Platzierung per Klick auf Fläche, Ø, Tiefe/durch, Bohrerspitze, zylindrische/kegelige Senkung), Rundung und Fase an beliebigen Kanten (gerade und gekrümmt, konvex und konkav), Schale (Flächen entfernen, Wandstärke)
 - **Editieren:** Muster (Richtung, 2 Richtungen, Achse), Spiegeln (Feature oder gesamte Geometrie)
 - **Modellbaum:** Definition editieren (Doppelklick), Umbenennen, Unterdrücken/Fortsetzen, Ausblenden, Löschen mit Abhängigkeiten, **Hier einfügen** (Einfügemarke/Rollback)
 - **Parameter & Relationen:** in jedem Maßfeld nutzbar, z. B. `L/2+5`, `sqrt(A^2+B^2)`
@@ -58,13 +60,15 @@ Ein zweiter Start holt das bereits laufende Fenster nach vorn.
 
 ### Analyse
 - Messen (Punkt-Punkt mit Eckpunktfang, ΔX/ΔY/ΔZ, Winkel und Abstand paralleler Flächen)
-- Masseeigenschaften (Volumen, Oberfläche, Masse mit Dichte, Schwerpunkt, Begrenzungsquader)
+- Masseeigenschaften exakt aus der B-Rep (Volumen, Oberfläche, Masse mit Dichte, Schwerpunkt, Topologie)
 
 ### Dateiformate
 | Format | Import | Export |
 |---|---|---|
 | BrowserCAD Part `.bcprt` / Baugruppe `.bcasm` (offenes JSON, s. u.) | ✔ | ✔ (Speichern) |
-| STEP `.stp/.step` | ✔ (OpenCascade/WASM, auch Mehrkörper → Baugruppe) | ✔ AP214 B-Rep |
+| OpenUSD B-Rep `.usda` (usd-brep, exakt) | – | ✔ (Windows) |
+| SMLib B-Rep `.brep` (usd-brep, exakt) | – | ✔ (Windows, Parts) |
+| STEP `.stp/.step` | ✔ (OpenCascade/WASM als Netz, auch Mehrkörper → Baugruppe) | ✔ AP214, facettiert |
 | IGES `.igs/.iges` | ✔ | – |
 | STL `.stl` (binär/ASCII) | ✔ | ✔ |
 | OpenUSD `.usda` | – | ✔ (Netz, `metersPerUnit = 0.001`) |
@@ -105,28 +109,41 @@ Ablauf wie in Creo: Ebene oder Fläche wählen → **Extrudieren** → Skizze ze
 
 ---
 
-## Bezug zu NVIDIA usd-brep
+## Modellierkern NVIDIA usd-brep
 
-[usd-brep](https://github.com/NVIDIA-Omniverse/usd-brep) ist eine C++/Python-Bibliothek für NURBS-B-Rep-Volumenmodellierung
-in OpenUSD. Sie wird mit NVIDIAs eigener Build-Kette (Packman, Visual Studio 2019-Toolset, nicht öffentliches
-macOS-Premake-Paket) gebaut und lässt sich daher nicht in eine per GitHub Actions erzeugte Einzeldatei-exe/-App einbetten.
-BrowserCAD lehnt sich konzeptionell daran an (B-Rep-Export, OpenUSD-Export mit Millimeter-Einheit, offene Datenformate)
-und verwendet einen eigenen, im Programmfenster (JavaScript/WebGL) laufenden Kern:
+[usd-brep](https://github.com/NVIDIA-Omniverse/usd-brep) ist NVIDIAs Bibliothek für NURBS-basierte
+B-Rep-Volumenmodellierung mit OpenUSD-Anbindung. BrowserCAD nutzt das offizielle Python-Paket
+([`usd-brep` auf PyPI](https://pypi.org/project/usd-brep/), CPython 3.12), das in der Windows-exe enthalten ist.
 
-- **Modellkern:** facettierter B-Rep-Ansatz (three.js + three-bvh-csg für Boolesche Operationen), eigene Profil-,
-  Extrusions-, Rotations-, Rundungs-/Fasen- und Musterlogik, Netzbereinigung (Verschweißen, T-Stöße)
-- **STEP-Export:** eigene AP214-Ausgabe; koplanare Dreiecke werden zu ebenen Flächen mit gemeinsamen Kanten zusammengefasst
-- **STEP/IGES-Import:** OpenCascade als WebAssembly (occt-import-js)
+**Aufgabenteilung:** Die Oberfläche wertet Parameter, Bezugsebenen/-achsen und Skizzen aus und schickt je Feature eine
+Operation an den Kern (`kernel.py`). Dort entstehen die Körper exakt:
 
-**Grenzen des Kerns:** Gekrümmte Flächen sind facettiert (Feinheit unter *Werkzeuge › Optionen*). Rundung/Fase
-arbeiten an geraden Kanten zwischen ebenen Flächen. Bei exakt deckungsgleichen Flächen zweier Körper können kleine
-Netzfehler entstehen; Creo/SolidWorks vernähen diese beim STEP-Import normalerweise. Skizzen, Bohrungen und
-Bezugsebenen auf einer **angeklickten Fläche** merken sich deren Lage zum Zeitpunkt der Auswahl (keine echte
-Flächenreferenz): Ändert sich danach die Tiefe eines vorherigen Features, im Dashboard die Ebene neu wählen. Für voll
-parametrische Modelle Bezugsebenen mit Versatz verwenden – der Versatz darf ein Parameter sein (z. B. `L`). Nicht enthalten sind u. a.
-Zeichnungen, Sweep/Blend, Schale und Formschrägen.
+| Feature | usd-brep-Funktion |
+|---|---|
+| Extrudieren (Linien, Bögen, Kreise, Inseln) | `linear_sweep`, `boolean_difference/union` |
+| Drehen | `rotational_sweep` |
+| Bohrung, Senkungen, Bohrerspitze | `create_cylinder`, `create_cone`, Boolesche Operationen |
+| Rundung / Fase (gerade **und gekrümmte** Kanten) | `fillet_edges` (Kreisquerschnitt bzw. linear) |
+| Schale | `shell_brep` |
+| Muster / Spiegeln | `transform`, `scale`, Boolesche Operationen |
+| Anzeige | `tessellate`, `tessellate_boundaries` |
+| Masseeigenschaften | `mass_properties` |
+| Export | `usd.export_brep(s)` (OpenUSD, omniSolid-Schema), `write_to_file` (SMLib) |
 
----
+Gewählte Kanten werden über ihren Mittelpunkt referenziert und bei jeder Regenerierung mit `find_edge` wiedergefunden.
+Scheitert eine Boolesche Operation an deckungsgleichen Flächen, wird sie mit einem minimal versetzten Werkzeug
+(Millionstel der Modellgröße) wiederholt.
+
+**Plattformen:** NVIDIA bietet usd-brep nur für **Windows und Linux** an. Für macOS gibt es kein Paket, und der
+Quellcode-Build benötigt laut NVIDIA ein nicht öffentliches Werkzeugpaket. Die **macOS-App verwendet deshalb den
+internen Netzkern** (three.js/three-bvh-csg): Extrudieren, Drehen, Bohrung, Muster und Spiegeln funktionieren dort auch,
+Rundung/Fase nur an geraden Kanten, keine Schale, kein exakter Export. Die Statusleiste zeigt den aktiven Kern.
+
+**Grenzen:** usd-brep hat keine STEP-Ein-/Ausgabe in Python. STEP/IGES werden deshalb mit OpenCascade (WebAssembly)
+als Netz importiert (Referenzgeometrie, nicht mit Features bearbeitbar), und der STEP-Export ist facettiert. Exakt
+exportieren BrowserCAD-Modelle nach **OpenUSD-B-Rep** und **SMLib-B-Rep**. Skizzen auf angeklickten Flächen merken sich
+deren Lage zum Zeitpunkt der Auswahl; für voll parametrische Modelle Bezugsebenen mit (parametrischem) Versatz nutzen.
+Nicht enthalten sind u. a. Zeichnungen, Sweep/Blend und Formschrägen.
 
 ## Dateiformat `.bcprt` / `.bcasm`
 
@@ -154,12 +171,12 @@ Beim Speichern bleibt die Vorversion als `*.bak` erhalten.
 
 ## Build
 
-Abhängigkeiten: Flask, Waitress, pywebview, hidapi (`requirements.txt`). Der Workflow `.github/workflows/build-release.yml` läuft bei jedem Push auf `main`/`master`, bei Tags `v*`
-und manuell. Er testet kurz den Server, baut mit PyInstaller (`BrowserCAD.spec`) und erzeugt ein Release
+Abhängigkeiten: Flask, Waitress, pywebview, hidapi, usd-brep (`requirements.txt`; Python **3.12** erforderlich, da usd-brep nur dafür angeboten wird). Der Workflow `.github/workflows/build-release.yml` läuft bei jedem Push auf `main`/`master`, bei Tags `v*`
+und manuell. Er prüft den usd-brep-Kern (Selbsttest im Quellcode und in der fertigen exe), baut mit PyInstaller (`BrowserCAD.spec`) und erzeugt ein Release
 `v<VERSION>-build<Nummer>` (bzw. den Tag-Namen) mit beiden Paketen. Die Version steht in `VERSION`.
 
 Lokal: `pip install -r requirements.txt pyinstaller` und `pyinstaller --noconfirm BrowserCAD.spec`.
 
 ## Lizenzen der enthaltenen Bibliotheken
-three.js (MIT), three-mesh-bvh (MIT), three-bvh-csg (MIT), occt-import-js (LGPL-2.1, mit OpenCascade LGPL-2.1 + Ausnahme) –
+NVIDIA usd-brep (Apache-2.0, mit gebündelter OpenUSD-Laufzeit), three.js (MIT), three-mesh-bvh (MIT), three-bvh-csg (MIT), occt-import-js (LGPL-2.1, mit OpenCascade LGPL-2.1 + Ausnahme) –
 Lizenztexte unter `static/vendor/`.

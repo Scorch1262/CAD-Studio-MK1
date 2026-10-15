@@ -1,7 +1,7 @@
 // Part-Dokument (Feature-Historie wie in Creo) und Regenerierung
 import * as THREE from '../vendor/three.module.js';
 import * as G from './geom.js';
-import { evalExpr, evalParams, uid, b64ToF32, f32ToB64 } from './util.js';
+import { evalExpr, evalParams, uid, b64ToF32, f32ToB64, b64ToU32, apiJson } from './util.js';
 
 export const PART_FORMAT = 'browsercad-part';
 export const FEATURE_INFO = {
@@ -16,6 +16,7 @@ export const FEATURE_INFO = {
   chamfer: { label: 'Fase', icon: 'chamfer' },
   pattern: { label: 'Muster', icon: 'pattern' },
   mirror: { label: 'Spiegeln', icon: 'mirror' },
+  shell: { label: 'Schale', icon: 'shell' },
   import: { label: 'Importierte Geometrie', icon: 'import' },
 };
 
@@ -70,7 +71,193 @@ export function hiddenByLayer(doc, f) {
 }
 
 // ------------------------------------------------------------------ Regenerierung
-export function regenerate(doc, opts = {}) {
+/** Modellierkern: usd-brep (Server) oder interner Netzkern (Rueckfallebene) */
+export let KERNEL = { available: false };
+export function setKernel(k) { KERNEL = k && k.available ? k : { available: false, ...(k || {}) }; }
+
+export async function regenerate(doc, opts = {}) {
+  if (KERNEL.available) return regenerateKernel(doc, opts);
+  return regenerateLocal(doc, opts);
+}
+
+function featureList(doc, opts) {
+  const stop = doc.insertAt === null || doc.insertAt === undefined ? doc.features.length : doc.insertAt;
+  const list = doc.features.map((f, i) => ({ f, rolled: i >= stop }));
+  if (opts.extra) {
+    const ri = opts.replaceId ? list.findIndex(x => x.f.id === opts.replaceId) : -1;
+    if (ri >= 0) list[ri] = { f: opts.extra, rolled: false };
+    else list.splice(stop, 0, { f: opts.extra, rolled: false });
+  }
+  return list;
+}
+
+/** usd-brep: Bezuege/Skizzen hier auswerten, Koerper exakt im Kern bauen */
+async function regenerateKernel(doc, opts = {}) {
+  const params = evalParams(doc.params);
+  const seg = doc.settings?.seg || 64;
+  const ctx = { params, seg, body: null, planes: new Map(), axes: new Map(), points: new Map(), csys: new Map(),
+    tools: new Map(), status: new Map(), errors: [], size: 200, ops: [], imports: [], kernel: true };
+  ctx.X = (v, nm = 'Wert') => { try { return evalExpr(v, params); } catch (e) { throw new Error(`${nm}: ${e.message}`); } };
+  const names = new Map();
+  for (const { f, rolled } of featureList(doc, opts)) {
+    names.set(f.id, f.name);
+    if (rolled) { ctx.status.set(f.id, 'rolledback'); continue; }
+    if (f.suppressed) { ctx.status.set(f.id, 'suppressed'); continue; }
+    try {
+      if (OPS[f.type]) { const op = OPS[f.type](f, ctx); if (op) ctx.ops.push({ fid: f.id, kind: f.type, ...op }); ctx.status.set(f.id, 'pending'); }
+      else if (f.type === 'import') { importGeom(f, ctx); ctx.status.set(f.id, 'ok'); }
+      else if (BUILD[f.type]) { BUILD[f.type](f, ctx); ctx.status.set(f.id, 'ok'); }
+      else throw new Error(`Unbekannter Feature-Typ ${f.type}`);
+    } catch (e) { ctx.status.set(f.id, 'error'); ctx.errors.push({ id: f.id, name: f.name, msg: e.message || String(e) }); }
+  }
+  let res = null;
+  if (ctx.ops.length) {
+    try { res = await apiJson('/api/kernel/regen', { ops: ctx.ops, tools: !opts.preview }); }
+    catch (e) { res = { status: Object.fromEntries(ctx.ops.map(o => [o.fid, `Kern nicht erreichbar: ${e.message}`])) }; }
+    for (const o of ctx.ops) {
+      const st = res.status?.[o.fid] ?? 'nicht ausgeführt';
+      if (st === 'ok') ctx.status.set(o.fid, 'ok');
+      else { ctx.status.set(o.fid, 'error'); ctx.errors.push({ id: o.fid, name: names.get(o.fid) || o.fid, msg: st }); }
+    }
+    for (const [fid, list] of Object.entries(res.tools || {})) ctx.tools.set(fid, list.map(t => ({ op: t.op, geom: G.prepGeom(geomFrom(t.pos, t.tri)) })));
+  }
+  // Anzeige-Netz: exakter Koerper (tesselliert) + importierte Netze
+  let mesh = null, display = null, edges = null;
+  const parts = [];
+  if (res?.mesh) parts.push({ pos: b64ToF32(res.mesh.pos), tri: b64ToU32(res.mesh.tri) });
+  for (const g of ctx.imports) { const m = G.cleanMesh(g); parts.push({ pos: m.pos, tri: m.tri }); }
+  if (parts.length) {
+    const np = parts.reduce((s, p) => s + p.pos.length, 0), nt = parts.reduce((s, p) => s + p.tri.length, 0);
+    const pos = new Float32Array(np), tri = new Uint32Array(nt); let po = 0, to = 0;
+    for (const p of parts) { pos.set(p.pos, po); for (let i = 0; i < p.tri.length; i++) tri[to + i] = p.tri[i] + po / 3; po += p.pos.length; to += p.tri.length; }
+    const bb = new THREE.Box3().setFromArray(pos); const diag = bb.isEmpty() ? 1 : bb.getSize(new THREE.Vector3()).length();
+    mesh = { pos, tri, tol: Math.max(1e-5, diag * 2e-7) };
+    display = G.meshToGeom(mesh);
+    edges = kernelEdges(res, ctx.imports);
+  }
+  const bb = display ? display.boundingBox.clone() : new THREE.Box3(new THREE.Vector3(-50, -50, -50), new THREE.Vector3(50, 50, 50));
+  return { ...ctx, mesh, display, edges, bbox: bb, props: res?.props || null, body: display ? true : null };
+}
+
+function geomFrom(posB64, triB64) {
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(b64ToF32(posB64), 3)); g.setIndex(new THREE.BufferAttribute(b64ToU32(triB64), 1));
+  return g;
+}
+/** Kanten des B-Rep (eine Polylinie je Kante) als Liniensegmente; userData: Segment -> Kante */
+function kernelEdges(res, imports) {
+  const seg = []; const segEdge = []; const polys = [];
+  if (res?.edges) {
+    const p = b64ToF32(res.edges.pts); let o = 0;
+    res.edges.counts.forEach((n, ei) => {
+      const pl = []; for (let k = 0; k < n; k++) pl.push([p[(o + k) * 3], p[(o + k) * 3 + 1], p[(o + k) * 3 + 2]]);
+      polys.push(pl);
+      for (let k = 0; k + 1 < n; k++) { seg.push(...pl[k], ...pl[k + 1]); segEdge.push(ei); }
+      o += n;
+    });
+  }
+  for (const g of imports) {
+    const e = G.featureEdges(G.cleanMesh(g)).attributes.position.array;
+    for (let i = 0; i < e.length; i += 6) { seg.push(...e.slice(i, i + 6)); segEdge.push(-1); }
+  }
+  const geo = new THREE.BufferGeometry(); geo.setAttribute('position', new THREE.Float32BufferAttribute(seg, 3));
+  geo.userData = { segEdge, polys };
+  return geo;
+}
+/** Referenz einer gewaehlten B-Rep-Kante (Mittelpunkt nach Bogenlaenge) */
+export function edgeRefFromPoly(pl) {
+  let L = 0; const acc = [0];
+  for (let i = 1; i < pl.length; i++) { L += Math.hypot(pl[i][0] - pl[i - 1][0], pl[i][1] - pl[i - 1][1], pl[i][2] - pl[i - 1][2]); acc.push(L); }
+  let mid = pl[0];
+  for (let i = 1; i < pl.length; i++) if (acc[i] >= L / 2) { const t = (L / 2 - acc[i - 1]) / ((acc[i] - acc[i - 1]) || 1); mid = pl[i - 1].map((v, k) => v + (pl[i][k] - v) * t); break; }
+  const step = Math.max(1, Math.floor(pl.length / 24)); const poly = pl.filter((_, i) => i % step === 0 || i === pl.length - 1).map(p => p.map(v => +v.toFixed(5)));
+  return { mid: mid.map(v => +v.toFixed(6)), a: pl[0], b: pl[pl.length - 1], poly, len: +L.toFixed(4) };
+}
+
+function importGeom(f, ctx) {
+  const p = f.params; const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(b64ToF32(p.mesh), 3));
+  const tr = p.offset ? p.offset.map((v, i) => ctx.X(v, 'XYZ'[i])) : [0, 0, 0];
+  if (tr.some(Boolean)) g.translate(...tr);
+  if (p.scale && Number(p.scale) !== 1) g.scale(Number(p.scale), Number(p.scale), Number(p.scale));
+  ctx.imports.push(g); ctx.tools.set(f.id, [{ geom: g, op: 'add' }]);
+}
+
+const frameJson = (fr) => ({ o: G.v3arr(fr.o), x: G.v3arr(fr.x), y: G.v3arr(fr.y) });
+function exactSketch(ctx, sk) {
+  const frame = planeRef(ctx, sk.plane);
+  const ents = G.resolveEntities(sk.entities || [], ctx.params);
+  const r = G.sketchCurveLoops(ents, ctx.seg);
+  if (r.open) throw new Error(`Skizze nicht geschlossen (${r.open} offene Kette${r.open > 1 ? 'n' : ''})`);
+  if (!r.shapes.length) throw new Error('Skizze enthält keine geschlossene Kontur');
+  return { frame, shapes: r.shapes, axis: r.axis };
+}
+function patternMats(ctx, p) {
+  const mats = [];
+  if (p.kind === 'axial') {
+    const ax = axisRef(ctx, p.axis); const n = Math.round(ctx.X(p.count, 'Anzahl')); const ang = ctx.X(p.angle, 'Winkel') * Math.PI / 180;
+    for (let i = 1; i < n; i++) {
+      const m = new THREE.Matrix4().makeTranslation(-ax.o.x, -ax.o.y, -ax.o.z);
+      m.premultiply(new THREE.Matrix4().makeRotationAxis(ax.d, ang * i)); m.premultiply(new THREE.Matrix4().makeTranslation(ax.o.x, ax.o.y, ax.o.z));
+      mats.push(m);
+    }
+  } else {
+    const d1 = axisRef(ctx, p.dir).d; const n1 = Math.round(ctx.X(p.count, 'Anzahl')); const s1 = ctx.X(p.spacing, 'Abstand');
+    const n2 = p.dir2 ? Math.round(ctx.X(p.count2 ?? 1, 'Anzahl 2')) : 1; const d2 = p.dir2 ? axisRef(ctx, p.dir2).d : null; const s2 = p.dir2 ? ctx.X(p.spacing2 ?? 0, 'Abstand 2') : 0;
+    for (let i = 0; i < n1; i++) for (let j = 0; j < n2; j++) {
+      if (!i && !j) continue;
+      const t = d1.clone().multiplyScalar(s1 * i); if (d2) t.addScaledVector(d2, s2 * j);
+      mats.push(new THREE.Matrix4().makeTranslation(t.x, t.y, t.z));
+    }
+  }
+  if (mats.length > 400) throw new Error('Zu viele Musterelemente (max. 400)');
+  return mats;
+}
+/** Feature -> Operation fuer den usd-brep-Kern */
+const OPS = {
+  extrude(f, ctx) {
+    const p = f.params; const { frame, shapes } = exactSketch(ctx, p.sketch);
+    const depth = p.through ? null : ctx.X(p.depth, 'Tiefe');
+    if (!p.through && !(depth > 0)) throw new Error('Tiefe muss > 0 sein');
+    const depth2 = p.side === 'two' && !p.through ? ctx.X(p.depth2 ?? p.depth, 'Tiefe 2') : null;
+    return { op: p.op || 'add', side: p.side || 'one', depth, depth2, through: !!p.through, flip: !!p.flip, frame: frameJson(frame), shapes };
+  },
+  revolve(f, ctx) {
+    const p = f.params; const { frame, shapes, axis } = exactSketch(ctx, p.sketch);
+    let ax = axis;
+    if (p.axis === 'H') ax = { x1: 0, y1: 0, x2: 1, y2: 0 }; else if (p.axis === 'V') ax = { x1: 0, y1: 0, x2: 0, y2: 1 };
+    if (!ax) throw new Error('Keine Mittellinie als Rotationsachse in der Skizze');
+    if (Math.hypot(ax.x2 - ax.x1, ax.y2 - ax.y1) < 1e-9) throw new Error('Rotationsachse hat Länge 0');
+    let ang = ctx.X(p.angle ?? 360, 'Winkel'); if (p.flip) ang = -ang;
+    return { op: p.op || 'add', frame: frameJson(frame), shapes, axis: { p: [ax.x1, ax.y1], d: [ax.x2 - ax.x1, ax.y2 - ax.y1] }, angle: ang };
+  },
+  hole(f, ctx) {
+    const p = f.params; const fr = planeRef(ctx, p.plane);
+    const o = fr.to3(ctx.X(p.u ?? 0, 'Position 1'), ctx.X(p.v ?? 0, 'Position 2'));
+    const dir = fr.n.clone().multiplyScalar(p.flip ? 1 : -1);
+    const r = ctx.X(p.d, 'Durchmesser') / 2; if (!(r > 0)) throw new Error('Durchmesser muss > 0 sein');
+    const out = { o: G.v3arr(o), dir: G.v3arr(dir), r, depth: p.through ? null : ctx.X(p.depth, 'Tiefe'), tip: p.tip !== false };
+    if (p.cbore) out.cbore = { r: ctx.X(p.cboreD, 'Senkdurchmesser') / 2, depth: ctx.X(p.cboreDepth, 'Senktiefe') };
+    else if (p.csink) out.csink = { r: ctx.X(p.csinkD, 'Senkdurchmesser') / 2 };
+    return out;
+  },
+  round(f, ctx) { return edgeOp(f, ctx); },
+  chamfer(f, ctx) { return edgeOp(f, ctx); },
+  pattern(f, ctx) { const p = f.params; return { ref: p.ref, mats: patternMats(ctx, p).map(m => Array.from(m.elements)) }; },
+  mirror(f, ctx) { const p = f.params; const fr = planeRef(ctx, p.plane); return { o: G.v3arr(fr.o), n: G.v3arr(fr.n), what: p.what, ref: p.ref, cross: p.cross || 'pos' }; },
+  shell(f, ctx) {
+    const p = f.params; const t = ctx.X(p.thickness, 'Wandstärke'); if (!(t > 0)) throw new Error('Wandstärke muss > 0 sein');
+    return { thickness: t, faces: (p.faces || []).map(x => x.point || x), outward: !!p.outward };
+  },
+};
+function edgeOp(f, ctx) {
+  const p = f.params; const s = ctx.X(p.size, f.type === 'round' ? 'Radius' : 'Abstand'); if (!(s > 0)) throw new Error('Wert muss > 0 sein');
+  if (!p.edges?.length) throw new Error('Keine Kanten gewählt');
+  const mid = (e) => e.mid || e.a.map((v, i) => (v + e.b[i]) / 2);
+  return { size: s, edges: p.edges.map(e => ({ mid: mid(e) })) };
+}
+
+/** Interner Netzkern (Rueckfallebene ohne usd-brep, z. B. macOS) */
+function regenerateLocal(doc, opts = {}) {
   const params = evalParams(doc.params);
   const seg = doc.settings?.seg || 64;
   const ctx = {
@@ -79,14 +266,7 @@ export function regenerate(doc, opts = {}) {
   };
   const X = (v, nm = 'Wert') => { try { return evalExpr(v, params); } catch (e) { throw new Error(`${nm}: ${e.message}`); } };
   ctx.X = X;
-  const stop = doc.insertAt === null || doc.insertAt === undefined ? doc.features.length : doc.insertAt;
-  const list = doc.features.map((f, i) => ({ f, rolled: i >= stop }));
-  if (opts.extra) {
-    const ri = opts.replaceId ? list.findIndex(x => x.f.id === opts.replaceId) : -1;
-    if (ri >= 0) list[ri] = { f: opts.extra, rolled: false };
-    else list.splice(stop, 0, { f: opts.extra, rolled: false });
-  }
-  for (const { f, rolled } of list) {
+  for (const { f, rolled } of featureList(doc, opts)) {
     if (rolled) { ctx.status.set(f.id, 'rolledback'); continue; }
     if (f.suppressed) { ctx.status.set(f.id, 'suppressed'); continue; }
     if (ctx.body) { const bb = G.bboxOf(ctx.body); if (!bb.isEmpty()) ctx.size = Math.max(50, bb.getSize(new THREE.Vector3()).length() * 2); }
@@ -295,6 +475,7 @@ const BUILD = {
       ctx.tools.set(f.id, [{ geom: mir, op: 'add' }]);
     }
   },
+  shell() { throw new Error('Schale benötigt den usd-brep-Kern (unter macOS nicht verfügbar)'); },
   import(f, ctx) {
     const p = f.params; const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(b64ToF32(p.mesh), 3));
@@ -313,7 +494,10 @@ function edgeFeature(f, ctx, kind) {
   if (!p.edges?.length) throw new Error('Keine Kanten gewählt');
   // Werkzeuge je Operation erst vereinigen, dann in einem Schritt anwenden (robust an Ecken)
   const by = { cut: null, add: null };
-  for (const e of p.edges) { const { tool, op } = G.edgeTool(e, s, kind, ctx.seg); by[op] = by[op] ? G.boolOp(by[op], tool, 'add') : tool; }
+  for (const e of p.edges) {
+    if (!e.n1) throw new Error('Diese Kante wurde mit dem usd-brep-Kern gewählt und kann vom internen Kern nicht verarbeitet werden');
+    const { tool, op } = G.edgeTool(e, s, kind, ctx.seg); by[op] = by[op] ? G.boolOp(by[op], tool, 'add') : tool;
+  }
   if (by.cut) apply(ctx, f, by.cut, 'cut');
   if (by.add) apply(ctx, f, by.add, 'add');
 }

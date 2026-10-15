@@ -44,7 +44,7 @@ export async function regenerateAssembly(asm, loadDoc, cache, depth = 0, stack =
         entry.kind = 'part';
         const key = c.file + '|' + JSON.stringify(data).length + '|' + (data._rev || '');
         let r = cache.get(key);
-        if (!r) { r = regenerate(data); cache.set(key, r); }
+        if (!r) { r = await regenerate(data); cache.set(key, r); }
         entry.regen = r; entry.color = c.color || data.color;
         if (r.errors.length) entry.error = `${r.errors.length} Feature-Fehler im Part`;
       }

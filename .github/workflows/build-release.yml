@@ -36,6 +36,16 @@ jobs:
       - name: Pruefen, dass Fenster- und USB-Bibliotheken vorhanden sind
         run: python -c "import webview, hid; print('pywebview + hidapi ok')"
 
+      - name: Modellierkern usd-brep pruefen
+        shell: bash
+        run: |
+          python -c "import kernel, json; i = kernel.KERNEL.info(); print(json.dumps(i))"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            python -c "import kernel, json; r = kernel.selftest(); print(json.dumps(r)); assert r['manifold'] and all(v == 'ok' for v in r['status'].values())"
+          else
+            echo "macOS: NVIDIA bietet usd-brep nicht fuer macOS an - die App nutzt den internen Kern."
+          fi
+
       - name: Kurztest (interner Server startet, Oberflaeche wird ausgeliefert)
         shell: bash
         env:
@@ -56,6 +66,39 @@ jobs:
 
       - name: PyInstaller
         run: pyinstaller --noconfirm --clean BrowserCAD.spec
+
+      - name: Selbsttest der fertigen exe (Kern usd-brep im Paket)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:BROWSERCAD_PORT = '8878'
+          $p = Start-Process -FilePath dist/BrowserCAD.exe -ArgumentList '--server' -PassThru
+          $up = $false
+          for ($i = 0; $i -lt 60; $i++) {
+            try { Invoke-RestMethod http://127.0.0.1:8878/api/state -TimeoutSec 5 | Out-Null; $up = $true; break } catch { Start-Sleep -Seconds 2 }
+          }
+          if (-not $up) {
+            Get-Content "$env:USERPROFILE\.browsercad\browsercad.log" -ErrorAction SilentlyContinue
+            Stop-Process $p -Force -ErrorAction SilentlyContinue
+            throw 'Die exe startet nicht'
+          }
+          $resp = Invoke-WebRequest http://127.0.0.1:8878/api/kernel/selftest -SkipHttpErrorCheck -TimeoutSec 120
+          Write-Host $resp.Content
+          try { Invoke-RestMethod -Method Post http://127.0.0.1:8878/api/shutdown | Out-Null } catch {}
+          $r = $resp.Content | ConvertFrom-Json
+          if (-not $r.ok -or -not $r.kernel.available) {
+            Get-Content "$env:USERPROFILE\.browsercad\browsercad.log" -ErrorAction SilentlyContinue
+            throw 'usd-brep-Kern in der exe nicht funktionsfaehig'
+          }
+
+      - name: Selbsttest der fertigen App (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          BROWSERCAD_PORT=8878 dist/BrowserCAD.app/Contents/MacOS/BrowserCAD --server &
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:8878/api/state > /dev/null && break; sleep 2; done
+          curl -sf http://127.0.0.1:8878/api/kernel/info
+          curl -sf -X POST http://127.0.0.1:8878/api/shutdown || true
 
       - name: Paket Windows
         if: runner.os == 'Windows'
@@ -113,6 +156,7 @@ jobs:
             echo "- macOS 12 oder neuer: ZIP entpacken, BrowserCAD.app beim ersten Mal per Rechtsklick > Oeffnen starten (nicht notarisiert)"
             echo
             echo "BrowserCAD laeuft als eigenes Programmfenster, kein Browser noetig. Die SpaceMouse wird direkt per USB erkannt."
+            echo "Modellierkern: NVIDIA usd-brep (exakte NURBS-B-Rep) in der Windows-exe. macOS: interner Kern, da usd-brep fuer macOS nicht angeboten wird."
             echo
             awk '/^## /{n++} n==1' CHANGELOG.md
           } > release_notes.md

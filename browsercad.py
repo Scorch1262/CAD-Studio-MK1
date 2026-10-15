@@ -196,6 +196,7 @@ def api_state():
         ui_mode=CFG.get("ui_mode", "desktop"),
         mode=RUN_MODE,
         hid=SPACEMOUSE.status(),
+        kernel=cadkernel.KERNEL.info(),
         platform=platform.system(),
         home=str(Path.home()),
     )
@@ -391,6 +392,44 @@ def api_config():
             CFG["ui_mode"] = data["ui_mode"]
         save_config(CFG)
     return jsonify(ok=True)
+
+
+# ------------------------------------------------------------------ Modellierkern usd-brep
+import kernel as cadkernel  # noqa: E402
+
+
+@app.get("/api/kernel/info")
+def api_kernel_info():
+    return jsonify(cadkernel.KERNEL.info())
+
+
+@app.get("/api/kernel/selftest")
+def api_kernel_selftest():
+    try:
+        return jsonify(ok=True, kernel=cadkernel.KERNEL.info(), result=cadkernel.selftest())
+    except Exception as e:  # noqa: BLE001
+        return jsonify(ok=False, kernel=cadkernel.KERNEL.info(), error=str(e)), 500
+
+
+@app.post("/api/kernel/regen")
+def api_kernel_regen():
+    data = request.get_json(force=True) or {}
+    try:
+        out, _ = cadkernel.build(data.get("ops", []), want_tools=bool(data.get("tools", True)))
+        return jsonify(ok=True, **out)
+    except Exception as e:  # noqa: BLE001
+        return jsonify(ok=False, error=str(e)), 500
+
+
+@app.post("/api/kernel/export")
+def api_kernel_export():
+    data = request.get_json(force=True) or {}
+    target = safe_path(data.get("path", ""))
+    try:
+        n = cadkernel.export(data.get("parts", []), target, data.get("format", "usd"))
+        return jsonify(ok=True, path=target.relative_to(workdir()).as_posix(), bodies=n)
+    except Exception as e:  # noqa: BLE001
+        return jsonify(ok=False, error=str(e)), 500
 
 
 # ------------------------------------------------------------------ Desktop-Hilfen
@@ -717,6 +756,7 @@ def main() -> None:
     server = create_server(app, host="127.0.0.1", port=port, threads=12,
                            max_request_body_size=1024 ** 3)
     SPACEMOUSE.start()
+    threading.Thread(target=cadkernel.KERNEL.load, name="kernel-load", daemon=True).start()
 
     if RUN_MODE == "server":
         server.run()
