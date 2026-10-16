@@ -1,5 +1,7 @@
 # CAD-Studio-MK1 1.4.0
 
+![CAD-Studio-MK1 – parametrisches 3D-CAD im Creo-Stil](docs/readme-banner.png)
+
 Eigenständiges 3D-CAD-Programm für Windows und macOS im dunklen Dashboard-Stil, dessen Bedienung sich an
 **PTC Creo Parametric** orientiert: Menüband mit Registerkarten, Modellbaum mit Einfügemarke, Feature-Dashboard
 mit ✔/✖, Layerbaum, Bezugsanzeige-Filter, Creo-Maussteuerung und 3Dconnexion-SpaceMouse.
